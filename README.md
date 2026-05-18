@@ -96,7 +96,7 @@ if (!requireNamespace("BiocManager", quietly = TRUE))
 BiocManager::install(c(
   "GEOquery", "DESeq2", "limma", "edgeR",
   "multiMiR", "miRBaseConverter", "clusterProfiler", "org.Hs.eg.db",
-  "affy", "oligo", "sva", "STRINGdb", "igraph"
+  "affy", "oligo", "sva"
 ), ask = FALSE, update = FALSE)
 
 # CRAN packages
@@ -429,10 +429,7 @@ ML-based-biomarker-discovery/
 - Querying 14 miRNA–target databases simultaneously with multiMiR; filtering for validated interactions
 - KEGG pathway enrichment analysis (does the AD pathway hsa05010 appear enriched?)
 - GO Biological Process enrichment and redundancy removal with clusterProfiler
-- Protein-protein interaction (PPI) network construction with STRINGdb; hub gene identification by degree centrality
-- Overlaying AD GWAS risk genes onto the PPI network
 - Generating the "paper figure": a forest plot combining log2FC, SHAP importance, and key targets
-- Simulating RT-qPCR analytical validation: ΔΔCt calculation, limit of detection (LOD) estimation
 - Regulatory considerations for a blood-based miRNA diagnostic: FDA IVD pathway overview
 
 **Lab tasks (RStudio, `Week6_Interpretation.R`, all sections in order):**
@@ -440,17 +437,13 @@ ML-based-biomarker-discovery/
 2. Section 3: multiMiR target query; filter for validated targets; cross-reference known AD genes
 3. Section 4: KEGG enrichment — confirm or deny hsa05010 enrichment
 4. Section 5: GO enrichment with term simplification
-5. Section 6: STRINGdb PPI network; identify hub genes; overlay AD GWAS genes
-6. Section 7: Generate forest plot (the "main figure")
-7. Section 8: Simulate qPCR validation experiment (ΔΔCt + LOD curve)
-8. Section 10: Print the full 6-week pipeline summary table
+5. Section 6: Generate forest plot (the "main figure")
+6. Section 7: Print the full 6-week pipeline summary table
 
 **Key output files produced (in `results/Week6/`):**
 - `composite_biomarker_ranking.csv`, `validated_targets.csv`
 - `kegg_enrichment.csv`, `go_enrichment_simplified.csv`
-- `ppi_network_hub_genes.csv`
 - `biomarker_forest_plot.png`
-- `qpcr_validation_simulation.png`
 
 ---
 

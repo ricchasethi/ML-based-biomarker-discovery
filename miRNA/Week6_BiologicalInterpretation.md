@@ -8,10 +8,8 @@
 By the end of Week 6, you will be able to:
 1. Cross-reference ML-derived feature importance (SHAP values) with the published literature to distinguish statistical biomarkers from mechanistically grounded biomarkers
 2. Query miRNA–target databases (miRTarBase, TargetScan, miRDB, multiMiR) to build evidence-tiered target gene lists for a panel of candidate biomarker miRNAs
-3. Perform over-representation analysis (ORA) and gene set enrichment analysis (GSEA) using clusterProfiler, and interpret enriched KEGG pathways and GO terms in the context of Alzheimer's disease biology
-4. Build a protein–protein interaction network from miRNA target proteins using STRINGdb, identify hub genes by degree centrality, and link network hubs to known AD genetic risk
-5. Navigate the five-stage biomarker development roadmap from discovery to clinical implementation, and identify what analytical and clinical validation experiments are required
-6. Articulate the regulatory pathway for an IVD diagnostic assay (FDA LDT/PMA, CE-IVD) and describe the key ethical considerations specific to predictive Alzheimer's disease diagnostics
+3. Perform over-representation analysis (ORA) using clusterProfiler, and interpret enriched KEGG pathways and GO terms in the context of Alzheimer's disease biology
+4. Navigate the five-stage biomarker development roadmap from discovery to clinical implementation, and identify what analytical and clinical validation experiments are required
 
 ---
 
@@ -81,7 +79,7 @@ These two categories represent very different levels of scientific confidence, a
 - Example: "miR-X targets BACE1 mRNA; its downregulation in AD serum could reflect loss of BACE1 suppression in peripheral immune cells, consistent with elevated amyloid production observed in this cohort"
 - Stronger basis for clinical translation: if the mechanism is right, the biomarker is more likely to be specific to AD rather than to confounders
 
-The goal of Modules 6.2–6.5 is to build mechanistic grounding for the top biomarker candidates.
+The goal of Modules 6.2–6.3 is to build mechanistic grounding for the top biomarker candidates.
 
 ---
 
@@ -465,188 +463,6 @@ A pathway with p.adjust = 0.04 but GeneRatio = 2/300 (2 genes out of 300 drive t
 
 ---
 
-## MODULE 6.4 — Protein-Protein Interaction Network Analysis
-
-### 6.4.1 Why Network Analysis?
-
-Enrichment analysis tells you which pathways are enriched in your target gene list. Network analysis tells you how those target proteins physically interact with each other — and with known disease proteins. This adds a spatial, structural dimension to the biological interpretation.
-
-In AD, the key question is: **Do the target proteins of your biomarker miRNAs directly interact with the core pathological proteins of AD (APP, BACE1, MAPT/tau, PSEN1/2, APOE)?** If they do, the mechanistic case for your biomarker panel is greatly strengthened.
-
----
-
-### 6.4.2 The STRING Database
-
-STRING (Search Tool for the Retrieval of Interacting Genes/Proteins; Szklarczyk et al., 2023) integrates protein interaction evidence from:
-- **Experimental:** co-immunoprecipitation, affinity capture, two-hybrid assays
-- **Co-expression:** proteins with correlated expression patterns across conditions/tissues
-- **Gene fusion:** proteins encoded by fused genes in some organisms (implies functional coupling)
-- **Neighborhood:** proteins consistently found in the same genomic neighborhood
-- **Text mining:** co-occurrence in PubMed abstracts
-- **Database:** curated pathway databases (KEGG, Reactome, etc.)
-
-Each interaction has a combined score (0–1000); a score > 700 is generally considered high confidence.
-
----
-
-### 6.4.3 STRINGdb R Package — Building the Network
-
-```r
-library(STRINGdb)
-library(igraph)
-
-# Initialize STRINGdb object for human
-string_db <- STRINGdb$new(
-  version     = "12.0",     # STRING version; update to latest available
-  species     = 9606,       # 9606 = Homo sapiens NCBI taxonomy ID
-  score_threshold = 700,    # minimum combined score (high confidence)
-  network_type = "full",    # "full" includes all evidence channels
-  input_directory = "data/raw/stringdb/"
-)
-
-# Map your target gene symbols to STRING IDs
-# Use the validated + high-confidence target list
-target_symbols <- unique(strong_evidence$target.symbol)
-proteins_mapped <- string_db$map(
-  data.frame(gene = target_symbols),
-  "gene",
-  removeUnmappedRows = TRUE
-)
-
-cat("Genes mapped to STRING IDs:", nrow(proteins_mapped), "\n")
-cat("Genes not found:", length(target_symbols) - nrow(proteins_mapped), "\n")
-
-# Retrieve interactions for mapped proteins
-# This downloads the interaction network for this gene set
-interactions <- string_db$get_interactions(proteins_mapped$STRING_id)
-cat("Total protein-protein interactions retrieved:", nrow(interactions), "\n")
-
-# Build igraph object for downstream analysis
-ppi_graph <- graph_from_data_frame(
-  interactions[, c("from", "to")],
-  directed  = FALSE,
-  vertices  = proteins_mapped
-)
-
-# Remove isolated nodes (no interactions)
-ppi_graph <- delete.vertices(ppi_graph, which(degree(ppi_graph) == 0))
-cat("Nodes in final network:", vcount(ppi_graph), "\n")
-cat("Edges in final network:", ecount(ppi_graph), "\n")
-```
-
----
-
-### 6.4.4 Hub Gene Identification — Degree Centrality
-
-A hub gene is a highly connected node in the network — a protein that physically interacts with many other proteins in the set. Hub genes are often biologically important because they are at functional intersections.
-
-```r
-# Compute degree centrality (number of direct connections per node)
-node_degree <- degree(ppi_graph)
-degree_df   <- data.frame(
-  STRING_id = names(node_degree),
-  degree    = as.integer(node_degree)
-)
-
-# Map STRING IDs back to gene symbols
-degree_df <- merge(degree_df, proteins_mapped[, c("STRING_id", "gene")],
-                   by = "STRING_id", all.x = TRUE)
-
-# Sort by degree
-degree_df <- degree_df[order(-degree_df$degree), ]
-
-cat("\nTop 20 hub genes by degree centrality:\n")
-print(head(degree_df[, c("gene", "degree")], 20))
-
-# Additional centrality measures
-betweenness_vals <- betweenness(ppi_graph, normalized = TRUE)
-closeness_vals   <- closeness(ppi_graph, normalized = TRUE)
-
-degree_df$betweenness <- betweenness_vals[match(degree_df$STRING_id, names(betweenness_vals))]
-degree_df$closeness   <- closeness_vals[match(degree_df$STRING_id, names(closeness_vals))]
-
-# Hub genes: top decile by degree AND betweenness
-hub_threshold <- quantile(degree_df$degree, 0.9)
-hub_genes     <- degree_df$gene[degree_df$degree >= hub_threshold]
-cat("\nHub genes (top 10% by degree):", paste(hub_genes, collapse = ", "), "\n")
-```
-
----
-
-### 6.4.5 Interpreting Hubs in AD Biology
-
-**Expected hub proteins for a well-characterized AD miRNA panel:**
-
-| Hub Protein | Degree (typical) | AD Relevance |
-|-------------|------------------|--------------|
-| **APP** | Very high | Amyloid precursor protein; targeted by miR-20a, miR-16, miR-101 |
-| **BACE1** | High | β-secretase; targeted by miR-29a/b, miR-107, miR-9; key Aβ generation enzyme |
-| **MAPT (tau)** | High | Microtubule-associated protein tau; targeted by miR-132, miR-9, miR-26a |
-| **SIRT1** | High | Histone deacetylase; targeted by miR-34a, miR-132; regulates tau acetylation |
-| **TP53** | Very high | p53 tumor suppressor; targeted by miR-34a; mediates neuronal apoptosis in AD |
-| **BCL2** | High | Anti-apoptotic; targeted by miR-34a, miR-15a; loss promotes neuronal death |
-| **CDK5** | High | Cyclin-dependent kinase 5; critical tau phosphorylation kinase |
-| **GSK3B** | High | Glycogen synthase kinase 3β; primary tau phosphorylation kinase; downstream of PI3K-Akt |
-| **PTEN** | High | Phosphatase; PI3K-Akt pathway regulator; targeted by miR-21 |
-| **FOXO3** | Moderate | Forkhead transcription factor; regulated by miR-132; oxidative stress response |
-
-If APP, BACE1, MAPT, or SIRT1 appear as top hub genes in your network, this constitutes strong mechanistic evidence that your biomarker miRNAs collectively regulate the core AD molecular machinery.
-
----
-
-### 6.4.6 Network Visualization
-
-```r
-# Visualize with igraph — mark AD genes distinctly
-# Define known AD risk/disease genes to highlight
-ad_highlight <- c("APP", "BACE1", "MAPT", "PSEN1", "PSEN2", "APOE", 
-                  "SIRT1", "CDK5", "GSK3B", "TP53", "FOXO3", "PTEN", "BCL2")
-
-# Assign node color by category
-V(ppi_graph)$is_ad_gene <- V(ppi_graph)$name %in% ad_highlight
-V(ppi_graph)$color      <- ifelse(V(ppi_graph)$is_ad_gene, "#D73027", "#74ADD1")
-V(ppi_graph)$size       <- ifelse(V(ppi_graph)$name %in% hub_genes, 12, 6)
-V(ppi_graph)$label      <- ifelse(V(ppi_graph)$name %in% c(hub_genes, ad_highlight),
-                                   V(ppi_graph)$name, NA)
-
-# Use Fruchterman-Reingold layout for biological networks
-set.seed(42)
-layout_fr <- layout_with_fr(ppi_graph)
-
-png("results/Week6/ppi_network.png", width = 1800, height = 1400, res = 150)
-plot(ppi_graph,
-     layout     = layout_fr,
-     vertex.label.cex  = 0.5,
-     vertex.label.color = "black",
-     vertex.frame.color = "white",
-     edge.width = 0.4,
-     edge.color = "grey70",
-     main       = "PPI Network — Top Biomarker miRNA Targets\n(Red = known AD gene; size ∝ degree centrality)")
-legend("bottomleft",
-       legend = c("AD risk/disease gene", "Target gene", "Hub gene (large)"),
-       fill   = c("#D73027", "#74ADD1", NA),
-       pch    = c(NA, NA, 19),
-       pt.cex = c(NA, NA, 2),
-       border = NA,
-       bty    = "n",
-       cex    = 0.8)
-dev.off()
-cat("Network plot saved to results/Week6/ppi_network.png\n")
-
-# For publication-quality visualization, export to Cytoscape:
-# 1. Export node and edge tables as CSV
-write.csv(as_data_frame(ppi_graph, what = "edges"),
-          "results/Week6/network_edges_for_cytoscape.csv", row.names = FALSE)
-write.csv(as_data_frame(ppi_graph, what = "vertices"),
-          "results/Week6/network_nodes_for_cytoscape.csv", row.names = FALSE)
-# 2. Open Cytoscape → File → Import → Network from file → import edge table
-# 3. Apply "yFiles Organic Layout" and color nodes by the is_ad_gene attribute
-```
-
-> **Cytoscape note for wet-lab biologists:** Cytoscape is a free, open-source network visualization platform. It produces publication-quality figures and allows interactive exploration of large networks. Once you export your edge and node tables from R, the workflow in Cytoscape is point-and-click. The STRING Cytoscape app also allows direct import of STRING networks without going through R. Both approaches are valid; R provides more reproducibility.
-
----
-
 ## MODULE 6.5 — Integrating Multi-Omics Context
 
 ### 6.5.1 How Blood miRNA Biomarkers Relate to Brain Transcriptomic Changes
@@ -1015,38 +831,6 @@ What will you have at the end? Why does it matter?
 - `results/Week6/validated_targets.csv`
 - Written interpretation: 1 paragraph describing what the enrichment results say about the biology of your biomarker miRNAs
 
----
-
-### Lab 6B — Network Analysis and Visualization (60 min)
-
-**Objective:** Build a PPI network from target genes and identify hub proteins with AD connections.
-
-**Step 1 (20 min):** STRINGdb network.
-- Initialize STRINGdb (species = 9606, score_threshold = 700)
-- Map your target gene symbols to STRING IDs
-- Retrieve interactions and build igraph object
-- Print: node count, edge count, isolated nodes removed
-
-**Step 2 (15 min):** Hub gene identification.
-- Compute degree centrality for all nodes
-- Identify top 10 hub genes (highest degree)
-- Check overlap with: known AD genes, GWAS hits, KEGG hsa05010 genes
-- Save hub gene table to `results/Week6/hub_genes.csv`
-
-**Step 3 (25 min):** Network visualization.
-- Color AD genes red, hub genes with large size, target genes blue
-- Save igraph plot to `results/Week6/ppi_network.png`
-- Export edge and node tables for Cytoscape
-- Open Cytoscape and import the tables
-- Apply organic layout and color nodes by AD gene status
-- Export as a high-resolution image from Cytoscape
-
-**Discussion questions:**
-1. Which hub genes appeared in your network that are also in the AD KEGG pathway?
-2. If miR-132-3p and miR-34a-5p both target SIRT1, what does this convergence suggest about SIRT1's importance in the AD miRNA regulatory network?
-3. How would you design a functional experiment (in a cell line or animal model) to test whether restoring miR-132 expression in a neuronal cell reduces tau phosphorylation?
-
----
 
 ## FINAL COURSE ASSIGNMENTS
 
@@ -1104,7 +888,7 @@ Working individually or in pairs, you will build and present a complete miRNA bi
 | Week 3 | Exploratory analysis | PCA plot (colored by group); unsupervised clustering heatmap; 1-paragraph interpretation |
 | Week 4 | Differential expression | Volcano plot; DE table with adjusted p-values; top 20 DE miRNAs |
 | Week 5 | ML classification | ROC curve; SHAP summary plot; performance metrics (AUC, sensitivity, specificity) |
-| Week 6 | Biological interpretation | Target gene table; KEGG dotplot; GO barplot; PPI network; biomarker panel summary figure |
+| Week 6 | Biological interpretation | Target gene table; KEGG dotplot; GO barplot; biomarker panel summary figure |
 
 **Written report (10–15 pages, single-spaced, 11pt):**
 1. Introduction (1–2 pages): Biological background of disease and miRNAs; rationale for the study

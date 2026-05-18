@@ -15,18 +15,14 @@
 #      the Alzheimer disease pathway (hsa05010) is enriched in the target gene set
 #   5. Run GO Biological Process enrichment; simplify redundant terms; interpret
 #      the top pathways in the context of AD neurobiological mechanisms
-#   6. Build a protein-protein interaction (PPI) network using STRINGdb; identify
-#      hub genes by degree centrality; overlay AD GWAS risk genes as colored nodes
-#   7. Generate the "main figure" of the hypothetical paper: a forest plot showing
+#   6. Generate the "main figure" of the hypothetical paper: a forest plot showing
 #      each biomarker miRNA with its log2FC, SHAP importance, and key target(s)
-#   8. Simulate an analytical validation experiment: qPCR Ct values for the top 3
-#      miRNAs, ΔΔCt calculation, and limit of detection (LOD) estimation
-#   9. Save all interpretation results (tables and plots) to results/Week6/
-#  10. Print a complete pipeline summary table and list all saved outputs from
+#   7. Save all interpretation results (tables and plots) to results/Week6/
+#   8. Print a complete pipeline summary table and list all saved outputs from
 #      every week; record session info for reproducibility
 #
 # Packages Required:
-#   multiMiR, clusterProfiler, org.Hs.eg.db, STRINGdb, igraph,
+#   multiMiR, clusterProfiler, org.Hs.eg.db,
 #   ggplot2, ggrepel, dplyr, readr, pheatmap, RColorBrewer
 #
 # Run each section with Ctrl+Enter (Windows/Linux) or Cmd+Enter (Mac).
@@ -42,16 +38,11 @@
 #
 # multiMiR installation note: multiMiR is available on Bioconductor.
 #   BiocManager::install("multiMiR")
-# STRINGdb installation:
-#   BiocManager::install("STRINGdb")
-
 suppressPackageStartupMessages({
   # Bioconductor packages
   library(multiMiR)          # Query 14 miRNA-target databases
   library(clusterProfiler)   # Pathway and GO enrichment (ORA, GSEA)
   library(org.Hs.eg.db)      # Human genome annotation (Gene symbols → Entrez IDs)
-  library(STRINGdb)          # Protein-protein interaction networks from STRING
-  library(igraph)            # Network construction and analysis
 
   # CRAN packages
   library(ggplot2)
@@ -77,13 +68,6 @@ AD_KNOWN_GENES <- c(
   "APP", "BACE1", "MAPT", "PSEN1", "PSEN2", "APOE", "SIRT1", "FOXO3",
   "CDK5", "GSK3B", "TP53", "BCL2", "PTEN", "ADAM10", "CLU", "BIN1",
   "SORL1", "TREM2", "PLCG2", "SPI1"
-)
-
-# AD GWAS risk genes (Jansen et al. 2019, Lambert et al. 2013, Wightman et al. 2021)
-GWAS_AD_GENES <- c(
-  "APOE", "BIN1", "CLU", "PICALM", "CR1", "ABCA7", "SORL1", "PTK2B",
-  "SPI1", "PLCG2", "TREM2", "FERMT2", "CASS4", "INPP5D", "MEF2C",
-  "HLA-DRB1", "ZCWPW1", "CELF1", "NME8", "TRIP4"
 )
 
 
@@ -451,25 +435,7 @@ all_target_symbols <- unique(c(strong_evidence$target.symbol,
                                 pred_df$target.symbol))
 cat("Total unique target genes (strong evidence + predicted):", length(all_target_symbols), "\n")
 
-# ---- 5E. Check for GWAS AD risk gene overlap ----
-gwas_overlap <- intersect(all_target_symbols, GWAS_AD_GENES)
-cat("\nTarget genes overlapping with AD GWAS risk loci:\n")
-if (length(gwas_overlap) > 0) {
-  print(gwas_overlap)
-  # Show which miRNA targets each GWAS gene
-  gwas_detail <- strong_evidence %>%
-    filter(target.symbol %in% GWAS_AD_GENES) %>%
-    select(mature.mirna, target.symbol, experiment)
-  if (nrow(gwas_detail) > 0) {
-    cat("\nmiRNA → GWAS gene interactions:\n")
-    print(gwas_detail)
-  }
-} else {
-  cat("No direct GWAS gene targets found in validated interactions.\n")
-  cat("Note: GWAS genes may appear in predicted targets (broader target set).\n")
-}
-
-# ---- 5F. Save target gene tables ----
+# ---- 5E. Save target gene tables ----
 write.csv(strong_evidence,
           "results/Week6/validated_targets_strong_evidence.csv",
           row.names = FALSE)
@@ -745,218 +711,7 @@ if (nrow(go_simp_df) > 0) {
 
 
 # ==============================================================================
-# SECTION 8: STRINGdb Protein-Protein Interaction Network Analysis
-# ==============================================================================
-# A PPI network shows how the target proteins of your biomarker miRNAs
-# physically interact with each other and with known AD disease proteins.
-#
-# Key question: Do targets of the biomarker miRNAs directly interact with
-# APP, BACE1, MAPT (tau), or SIRT1?
-# If yes, the mechanistic case for the biomarker panel is strongly supported.
-#
-# STRING confidence score: 0–1000
-#   < 400 = low confidence
-#   400–700 = medium confidence
-#   > 700 = high confidence  ← we use this threshold
-
-cat("\n=== Building Protein-Protein Interaction Network (STRINGdb) ===\n")
-
-# ---- 8A. Initialize STRINGdb ----
-# Ensure the data/ directory exists for STRINGdb cache files
-if (!dir.exists("data/raw/stringdb")) {
-  dir.create("data/raw/stringdb", recursive = TRUE)
-}
-
-cat("Initializing STRINGdb (species = 9606 [H. sapiens], score threshold = 700)...\n")
-cat("First run will download STRING network files (~80 MB); subsequent runs use cache.\n")
-
-string_db <- STRINGdb$new(
-  version          = "12.0",       # STRING version; update to latest
-  species          = 9606,         # 9606 = Homo sapiens NCBI taxonomy ID
-  score_threshold  = 700,          # high-confidence interactions only
-  network_type     = "full",       # "full" = all evidence channels combined
-  input_directory  = "data/raw/stringdb/"
-)
-
-# ---- 8B. Map target gene symbols to STRING protein IDs ----
-# STRING uses its own internal protein IDs (9606.ENSPxxxxxxxxxxx format)
-# We must map our gene symbols to STRING IDs before querying interactions
-
-target_gene_df <- data.frame(
-  gene = unique(strong_evidence$target.symbol),
-  stringsAsFactors = FALSE
-)
-
-cat("Mapping", nrow(target_gene_df), "target genes to STRING IDs...\n")
-
-proteins_mapped <- string_db$map(
-  my_data_frame          = target_gene_df,
-  my_data_frame_id_col   = "gene",
-  removeUnmappedRows     = TRUE
-)
-
-n_mapped <- nrow(proteins_mapped)
-n_unmapped <- nrow(target_gene_df) - n_mapped
-cat("Genes mapped to STRING:", n_mapped, "of", nrow(target_gene_df), "\n")
-if (n_unmapped > 0) {
-  unmapped_genes <- setdiff(target_gene_df$gene, proteins_mapped$gene)
-  cat("Unmapped genes (not found in STRING):", paste(unmapped_genes, collapse = ", "), "\n")
-}
-
-# ---- 8C. Retrieve interactions for mapped proteins ----
-# string_db$get_interactions() downloads all edges between the mapped proteins
-# that meet the score threshold specified at initialization
-
-cat("Retrieving interactions (STRING score >= 700)...\n")
-interactions <- string_db$get_interactions(proteins_mapped$STRING_id)
-cat("Total interactions retrieved:", nrow(interactions), "\n")
-
-# ---- 8D. Build igraph network object ----
-if (nrow(interactions) > 0) {
-  ppi_graph <- graph_from_data_frame(
-    d         = interactions[, c("from", "to", "combined_score")],
-    directed  = FALSE,
-    vertices  = proteins_mapped
-  )
-
-  # Edge weight = STRING combined score (700–1000)
-  E(ppi_graph)$weight <- interactions$combined_score
-  V(ppi_graph)$gene   <- proteins_mapped$gene[match(V(ppi_graph)$name,
-                                                     proteins_mapped$STRING_id)]
-
-  # Remove isolated nodes (nodes with no edges at the score threshold)
-  isolated <- which(degree(ppi_graph) == 0)
-  if (length(isolated) > 0) {
-    ppi_graph <- delete.vertices(ppi_graph, isolated)
-    cat("Isolated nodes removed:", length(isolated), "\n")
-  }
-
-  cat("Final network: nodes =", vcount(ppi_graph),
-      "| edges =", ecount(ppi_graph), "\n")
-
-} else {
-  cat("No interactions found at score threshold 700.\n")
-  cat("Try lowering score_threshold to 400 (medium confidence).\n")
-
-  # For demonstration, build a synthetic small network
-  # using known AD gene interactions from the literature
-  set.seed(42)
-  demo_genes  <- c("APP", "BACE1", "MAPT", "SIRT1", "TP53", "BCL2",
-                   "PTEN", "CDK5", "GSK3B", "FOXO3", "TRAF6", "IRAK1")
-  demo_edges  <- data.frame(
-    from = c("APP","APP","BACE1","MAPT","SIRT1","TP53","BCL2","PTEN",
-             "CDK5","GSK3B","FOXO3","TRAF6","SIRT1","APP","MAPT"),
-    to   = c("BACE1","PSEN1","APP","CDK5","FOXO3","BCL2","BCL2","GSK3B",
-             "GSK3B","MAPT","SIRT1","IRAK1","TP53","SIRT1","GSK3B"),
-    stringsAsFactors = FALSE
-  )
-  ppi_graph <- graph_from_data_frame(demo_edges, directed = FALSE,
-                                     vertices = data.frame(name = demo_genes))
-  V(ppi_graph)$gene <- V(ppi_graph)$name
-  cat("Using synthetic demo network for visualization.\n")
-}
-
-# ---- 8E. Compute degree centrality and identify hub genes ----
-node_degree  <- degree(ppi_graph)
-node_between <- betweenness(ppi_graph, normalized = TRUE)
-node_close   <- closeness(ppi_graph, normalized = TRUE)
-
-degree_df <- data.frame(
-  STRING_id   = V(ppi_graph)$name,
-  gene        = V(ppi_graph)$gene,
-  degree      = as.integer(node_degree),
-  betweenness = round(node_between, 4),
-  closeness   = round(node_close, 4),
-  stringsAsFactors = FALSE
-) %>%
-  arrange(desc(degree))
-
-cat("\nTop 15 hub genes (degree centrality):\n")
-print(head(degree_df[, c("gene", "degree", "betweenness", "closeness")], 15))
-
-# Hub genes: top 10% by degree
-hub_threshold <- quantile(degree_df$degree, 0.9)
-hub_genes_vec <- degree_df$gene[degree_df$degree >= hub_threshold]
-cat("\nHub genes (top 10% by degree, threshold >=", hub_threshold, "):\n")
-cat(paste(hub_genes_vec, collapse = ", "), "\n")
-
-# ---- 8F. Identify AD gene hub overlap ----
-ad_hub_overlap <- intersect(hub_genes_vec, AD_KNOWN_GENES)
-gwas_hub_overlap <- intersect(hub_genes_vec, GWAS_AD_GENES)
-cat("\nHub genes that are known AD disease genes:", paste(ad_hub_overlap, collapse = ", "), "\n")
-cat("Hub genes that overlap with AD GWAS loci:", paste(gwas_hub_overlap, collapse = ", "), "\n")
-
-# ---- 8G. Network visualization ----
-# Color coding:
-#   Red (#D73027)   = known AD disease gene
-#   Blue (#74ADD1)  = target gene (not AD-specific)
-#   Node size       = proportional to degree centrality (hub = larger)
-#   Label           = shown only for hub genes and known AD genes (to avoid clutter)
-
-V(ppi_graph)$is_ad_gene   <- V(ppi_graph)$gene %in% AD_KNOWN_GENES
-V(ppi_graph)$is_hub       <- V(ppi_graph)$gene %in% hub_genes_vec
-V(ppi_graph)$is_gwas      <- V(ppi_graph)$gene %in% GWAS_AD_GENES
-
-# Node appearance
-V(ppi_graph)$color <- ifelse(V(ppi_graph)$is_ad_gene, "#D73027",
-                       ifelse(V(ppi_graph)$is_gwas, "#FD8D3C", "#74ADD1"))
-V(ppi_graph)$frame.color <- "white"
-V(ppi_graph)$size  <- 4 + (node_degree[V(ppi_graph)$name] /
-                             max(node_degree) * 14)
-
-# Show labels only for genes of interest
-label_genes   <- union(hub_genes_vec, AD_KNOWN_GENES)
-V(ppi_graph)$label <- ifelse(V(ppi_graph)$gene %in% label_genes,
-                              V(ppi_graph)$gene, NA)
-
-# Edge appearance
-E(ppi_graph)$width <- 0.5
-E(ppi_graph)$color <- "grey70"
-
-set.seed(42)
-layout_fr <- layout_with_fr(ppi_graph, niter = 1000)
-
-png("results/Week6/ppi_network.png",
-    width = 2000, height = 1600, res = 150)
-par(mar = c(2, 2, 3, 2), bg = "white")
-plot(
-  ppi_graph,
-  layout            = layout_fr,
-  vertex.label.cex  = 0.55,
-  vertex.label.color = "black",
-  vertex.label.font = 2,
-  main = "PPI Network — Top 15 Biomarker miRNA Target Proteins\n(String score ≥ 700 | Node size ∝ degree centrality)",
-  cex.main = 0.9
-)
-legend(
-  "bottomleft",
-  legend = c("Known AD gene", "AD GWAS locus", "Other target"),
-  fill   = c("#D73027", "#FD8D3C", "#74ADD1"),
-  border = NA,
-  bty    = "n",
-  cex    = 0.8
-)
-dev.off()
-cat("\nPPI network plot saved to results/Week6/ppi_network.png\n")
-
-# ---- 8H. Export network tables for Cytoscape ----
-# For publication-quality figures, import these tables into Cytoscape
-# and apply the "yFiles Organic Layout"
-node_table <- as_data_frame(ppi_graph, what = "vertices")
-edge_table  <- as_data_frame(ppi_graph, what = "edges")
-
-write.csv(node_table, "results/Week6/network_nodes_for_cytoscape.csv", row.names = FALSE)
-write.csv(edge_table, "results/Week6/network_edges_for_cytoscape.csv", row.names = FALSE)
-
-# ---- 8I. Save hub gene table ----
-write.csv(degree_df, "results/Week6/hub_genes_centrality.csv", row.names = FALSE)
-
-cat("Network tables saved to results/Week6/\n")
-cat("To open in Cytoscape: File → Import → Network from file → select edge CSV\n")
-
-
-# ==============================================================================
-# SECTION 9: Biomarker Panel Summary Figure — Forest Plot
+# SECTION 8: Biomarker Panel Summary Figure — Forest Plot
 # ==============================================================================
 # This is the "main figure" of the hypothetical paper: a single forest-plot-style
 # figure that communicates four things simultaneously for each of the top 15 miRNAs:
@@ -1074,256 +829,7 @@ cat("  PDF: results/Week6/biomarker_panel_forest_plot.pdf\n")
 
 
 # ==============================================================================
-# SECTION 10: Analytical Validation Simulation — qPCR Experiment
-# ==============================================================================
-# Before a miRNA biomarker can enter clinical use, the discovery RNA-seq result
-# must be verified by an orthogonal, analytically validated assay.
-# The gold standard is quantitative RT-PCR (qPCR) using TaqMan or SYBR Green
-# chemistry, with a spike-in synthetic miRNA for normalization.
-#
-# This section simulates a qPCR validation experiment for the top 3 miRNAs.
-# Key outputs:
-#   1. Ct value distributions for AD vs Control (box plots)
-#   2. ΔCt (Ct[target] − Ct[reference]) for each group
-#   3. ΔΔCt (ΔCt[AD] − ΔCt[Control]) = log2 fold change estimate
-#   4. A simulated LOD (limit of detection) curve
-#
-# Real qPCR values for serum miRNAs (TaqMan): typical Ct range 20–36.
-# Lower Ct = higher expression.
-# The reference miRNA (cel-miR-39 spike-in) has a Ct set to 23 in all samples
-# (constant because it is added at a defined concentration before extraction).
-
-cat("\n=== Analytical Validation Simulation: qPCR ===\n")
-
-# ---- 10A. Define experiment parameters ----
-set.seed(99)
-n_ad      <- 30    # AD samples
-n_ctrl    <- 30    # Control samples
-ref_ct    <- 23.0  # Spike-in reference Ct (constant across samples; ±0.5 technical noise)
-ref_sd    <- 0.5   # Technical noise on reference
-
-# Top 3 miRNAs from our panel
-top3_mirnas  <- top_mirna_names[1:3]
-top3_log2FC  <- forest_df$log2FC[match(top3_mirnas, as.character(forest_df$miRNA))]
-# If something went wrong with matching, set defaults
-if (any(is.na(top3_log2FC))) {
-  top3_log2FC <- c(-2.1, 1.6, -1.9)
-}
-
-# Ct values for a miRNA upregulated in AD:
-#   Ct[AD] < Ct[Control] (lower Ct = more abundant)
-# For a downregulated miRNA in AD:
-#   Ct[AD] > Ct[Control]
-# log2FC = −ΔΔCt, so ΔΔCt = −log2FC
-# Therefore: Ct[AD] = Ct[Control] + log2FC  (noting that higher Ct = lower expression)
-
-mirna_ctrl_ct_base <- c(28.5, 25.2, 30.1)  # baseline Ct in controls (realistic range)
-mirna_ad_ct_base   <- mirna_ctrl_ct_base - top3_log2FC  # AD Ct adjusted by log2FC
-# Note: log2FC = -1.8 means AD is lower; in Ct space AD Ct is higher (+1.8)
-
-# ---- 10B. Simulate Ct measurements ----
-# Within-sample technical CV ≈ 2% for qPCR → ≈ 0.3–0.5 Ct units SD
-# Biological variance between samples ≈ 1.0–2.0 Ct units SD
-within_sample_sd <- 0.4   # technical Ct noise
-biological_sd    <- 1.2   # between-sample biological noise
-
-qpcr_data <- lapply(seq_along(top3_mirnas), function(i) {
-
-  # Control samples
-  ctrl_ct_obs <- mirna_ctrl_ct_base[i] +
-    rnorm(n_ctrl, 0, biological_sd) +   # biological variation
-    rnorm(n_ctrl, 0, within_sample_sd)  # technical variation
-
-  # AD samples
-  ad_ct_obs <- mirna_ad_ct_base[i] +
-    rnorm(n_ad, 0, biological_sd) +
-    rnorm(n_ad, 0, within_sample_sd)
-
-  # Reference Ct (cel-miR-39 spike-in; same for all samples ± technical noise)
-  ctrl_ref <- ref_ct + rnorm(n_ctrl, 0, ref_sd)
-  ad_ref   <- ref_ct + rnorm(n_ad,   0, ref_sd)
-
-  data.frame(
-    miRNA     = top3_mirnas[i],
-    sample_id = c(paste0("CTRL_", seq_len(n_ctrl)),
-                  paste0("AD_",   seq_len(n_ad))),
-    group     = rep(c("Control", "Alzheimer's Disease"), c(n_ctrl, n_ad)),
-    Ct_target = c(ctrl_ct_obs, ad_ct_obs),
-    Ct_ref    = c(ctrl_ref,    ad_ref),
-    stringsAsFactors = FALSE
-  )
-})
-
-qpcr_df <- bind_rows(qpcr_data) %>%
-  mutate(
-    delta_Ct    = Ct_target - Ct_ref,  # ΔCt = Ct[target] − Ct[reference]
-    group       = factor(group, levels = c("Control", "Alzheimer's Disease"))
-  )
-
-# ---- 10C. Compute ΔΔCt and fold change ----
-ddct_summary <- qpcr_df %>%
-  group_by(miRNA, group) %>%
-  summarise(
-    mean_Ct       = round(mean(Ct_target), 2),
-    sd_Ct         = round(sd(Ct_target),   2),
-    mean_delta_Ct = round(mean(delta_Ct),  2),
-    sd_delta_Ct   = round(sd(delta_Ct),    2),
-    n_samples     = n(),
-    .groups       = "drop"
-  )
-
-ddct_fold <- qpcr_df %>%
-  group_by(miRNA) %>%
-  summarise(
-    ctrl_mean_dCt = mean(delta_Ct[group == "Control"]),
-    ad_mean_dCt   = mean(delta_Ct[group == "Alzheimer's Disease"]),
-    .groups       = "drop"
-  ) %>%
-  mutate(
-    delta_delta_Ct = ad_mean_dCt - ctrl_mean_dCt,
-    # ΔΔCt-based fold change: 2^(−ΔΔCt)
-    # Note sign: for downregulated miRNA, ΔΔCt > 0, fold change < 1 (loss in AD)
-    fold_change_2exp = round(2^(-delta_delta_Ct), 3),
-    log2FC_qPCR      = round(-delta_delta_Ct, 3)
-  )
-
-cat("=== ΔΔCt Results (qPCR Analytical Validation Simulation) ===\n")
-print(ddct_fold[, c("miRNA", "ctrl_mean_dCt", "ad_mean_dCt",
-                    "delta_delta_Ct", "fold_change_2exp", "log2FC_qPCR")])
-
-# ---- 10D. Compare qPCR log2FC vs RNA-seq log2FC ----
-comparison_df <- ddct_fold %>%
-  left_join(top15[, c("miRNA", "log2FC")], by = "miRNA") %>%
-  rename(log2FC_RNAseq = log2FC)
-
-cat("\nComparison of RNA-seq vs simulated qPCR log2FC:\n")
-cat("(These should be concordant in direction if biomarker is genuine)\n")
-print(comparison_df[, c("miRNA", "log2FC_RNAseq", "log2FC_qPCR")])
-
-# ---- 10E. Ct Box Plot ----
-p_ct_box <- ggplot(qpcr_df, aes(x = group, y = delta_Ct, fill = group)) +
-  geom_boxplot(outlier.shape = 16, outlier.size = 1.5, alpha = 0.85, width = 0.5) +
-  geom_jitter(width = 0.1, alpha = 0.35, size = 1.0, colour = "grey30") +
-  scale_fill_manual(values = GROUP_COLOURS, name = NULL) +
-  facet_wrap(~ miRNA, scales = "free_y", ncol = 3) +
-  labs(
-    title    = "Simulated qPCR Validation — ΔCt Values (AD vs Control)",
-    subtitle = "ΔCt = Ct[target] − Ct[spike-in reference (cel-miR-39)]\nLower ΔCt = higher miRNA expression",
-    x        = NULL,
-    y        = "ΔCt (target − reference)",
-    caption  = "Simulation: biological SD = 1.2 Ct; technical SD = 0.4 Ct; n = 30 per group"
-  ) +
-  theme_bw(base_size = 11) +
-  theme(
-    plot.title     = element_text(face = "bold", size = 12),
-    plot.subtitle  = element_text(size = 8.5, colour = "grey40"),
-    strip.text     = element_text(face = "bold", size = 9),
-    legend.position = "none",
-    axis.text.x    = element_text(angle = 15, hjust = 1, size = 8),
-    plot.caption   = element_text(size = 7, colour = "grey50")
-  )
-
-ggsave("results/Week6/qpcr_validation_sim.png",
-       p_ct_box, width = 11, height = 5, dpi = 150)
-cat("\nqPCR validation box plots saved to results/Week6/qpcr_validation_sim.png\n")
-
-# ---- 10F. Limit of Detection (LOD) Simulation ----
-# LOD is estimated by serially diluting a positive control sample (e.g., pooled AD serum)
-# and measuring Ct at each dilution. The LOD is the concentration where signal
-# is reliably distinguished from a no-template control (NTC).
-# LOD = mean(NTC_Ct) − 3 × SD(NTC_Ct) in Ct units (since Ct increases with dilution)
-# Here we simulate 10 serial 2-fold dilutions of a positive control.
-
-cat("\nSimulating LOD determination for", top3_mirnas[1], "...\n")
-set.seed(11)
-
-dilution_factors  <- 2^(0:9)       # 1x, 2x, 4x, 8x, ... 512x dilution
-dilution_labels   <- paste0("1:", dilution_factors)
-copies_per_uL_start <- 10000       # estimated copies/µL in undiluted sample
-copies_per_uL    <- copies_per_uL_start / dilution_factors
-
-# PCR efficiency ≈ 100%; theoretical: each 2-fold dilution adds 1.0 Ct
-# Real efficiency: typically 90–110%; add measurement noise
-efficiency       <- 0.98           # 98% efficiency
-Ct_start         <- 20.0           # Ct at undiluted concentration
-Ct_at_dilution   <- Ct_start + (0:9) / (log(1 + efficiency) / log(2))
-
-n_replicates     <- 3
-lod_df <- do.call(rbind, lapply(seq_along(dilution_factors), function(i) {
-  data.frame(
-    dilution     = dilution_labels[i],
-    dilution_num = dilution_factors[i],
-    copies_uL    = copies_per_uL[i],
-    Ct_obs       = Ct_at_dilution[i] + rnorm(n_replicates, 0, 0.4),
-    replicate    = seq_len(n_replicates)
-  )
-}))
-
-# NTC (no template control) — Ct should be above 40 or undetermined
-ntc_ct     <- rnorm(n_replicates, mean = 42, sd = 0.8)
-ntc_mean   <- mean(ntc_ct)
-ntc_sd     <- sd(ntc_ct)
-lod_ct_threshold <- ntc_mean - 3 * ntc_sd   # 3 SD below NTC mean
-
-# Find LOD: lowest dilution where ALL replicates are below the threshold
-lod_df$above_threshold <- lod_df$Ct_obs < lod_ct_threshold
-# (Lower Ct = detected; threshold is the boundary)
-
-cat(sprintf("NTC mean Ct = %.1f | SD = %.2f | LOD threshold = %.1f Ct\n",
-            ntc_mean, ntc_sd, lod_ct_threshold))
-
-# Plot LOD curve
-lod_summary <- lod_df %>%
-  group_by(dilution_num, copies_uL) %>%
-  summarise(
-    mean_Ct = mean(Ct_obs),
-    sd_Ct   = sd(Ct_obs),
-    .groups = "drop"
-  )
-
-p_lod <- ggplot(lod_df, aes(x = log2(dilution_num), y = Ct_obs)) +
-  geom_point(colour = "#D73027", alpha = 0.8, size = 2.5) +
-  geom_smooth(method = "lm", formula = y ~ x,
-              se = TRUE, colour = "#4575B4", linewidth = 1) +
-  geom_hline(yintercept = lod_ct_threshold,
-             linetype = "dashed", colour = "grey30", linewidth = 0.8) +
-  annotate("text", x = 7, y = lod_ct_threshold - 0.4,
-           label = paste0("LOD threshold (NTC − 3SD): Ct = ",
-                          round(lod_ct_threshold, 1)),
-           colour = "grey30", size = 3) +
-  scale_x_continuous(
-    breaks = 0:9,
-    labels = dilution_labels
-  ) +
-  labs(
-    title    = paste0("LOD Determination — ", top3_mirnas[1]),
-    subtitle = "Serial 2-fold dilutions of pooled AD serum; n = 3 replicates per dilution",
-    x        = "Dilution factor",
-    y        = "Ct value",
-    caption  = paste0("Start: ", copies_per_uL_start, " copies/µL | ",
-                      "Dashed line: LOD threshold (NTC − 3 × SD)")
-  ) +
-  theme_bw(base_size = 11) +
-  theme(
-    plot.title    = element_text(face = "bold", size = 11),
-    plot.subtitle = element_text(size = 8.5, colour = "grey40"),
-    axis.text.x   = element_text(angle = 35, hjust = 1, size = 8),
-    plot.caption  = element_text(size = 7, colour = "grey50")
-  )
-
-ggsave("results/Week6/lod_curve_sim.png",
-       p_lod, width = 8, height = 5, dpi = 150)
-cat("LOD curve simulation saved to results/Week6/lod_curve_sim.png\n")
-
-# ---- 10G. Save qPCR results ----
-write.csv(ddct_fold,    "results/Week6/qpcr_ddct_results.csv",    row.names = FALSE)
-write.csv(ddct_summary, "results/Week6/qpcr_ct_summary.csv",      row.names = FALSE)
-write.csv(lod_df,       "results/Week6/lod_simulation_data.csv",  row.names = FALSE)
-cat("qPCR simulation tables saved to results/Week6/\n")
-
-
-# ==============================================================================
-# SECTION 11: Save All Interpretation Results
+# SECTION 9: Save All Interpretation Results
 # ==============================================================================
 # Consolidate and confirm all files saved in this session.
 # Also save the key R objects for downstream use.
@@ -1335,8 +841,6 @@ saveRDS(top15,          "results/Week6/top15_biomarker_mirnas.rds")
 saveRDS(strong_evidence,"results/Week6/validated_targets.rds")
 saveRDS(kegg_df,        "results/Week6/kegg_enrichment.rds")
 saveRDS(go_simp_df,     "results/Week6/go_bp_enrichment.rds")
-saveRDS(degree_df,      "results/Week6/network_centrality.rds")
-saveRDS(ddct_fold,      "results/Week6/qpcr_ddct.rds")
 
 # List all files in results/Week6/
 week6_files <- list.files("results/Week6/", full.names = FALSE)
@@ -1350,7 +854,7 @@ for (f in sort(week6_files)) {
 
 
 # ==============================================================================
-# SECTION 12: Course Completion Summary
+# SECTION 10: Course Completion Summary
 # ==============================================================================
 # Print a final pipeline summary table listing every major output from all
 # 6 weeks of the course, then record session info for reproducibility.
@@ -1368,7 +872,7 @@ pipeline_summary <- data.frame(
     "Week 3", "Week 3", "Week 3",
     "Week 4", "Week 4", "Week 4",
     "Week 5", "Week 5", "Week 5",
-    "Week 6", "Week 6", "Week 6", "Week 6", "Week 6", "Week 6", "Week 6"
+    "Week 6", "Week 6", "Week 6", "Week 6", "Week 6"
   ),
   Stage = c(
     "Setup",          "Setup",
@@ -1376,8 +880,8 @@ pipeline_summary <- data.frame(
     "EDA",            "EDA",            "Clustering",
     "Differential Expression", "Visualization", "Output",
     "ML Modelling",   "Explainability", "Validation",
-    "Target Prediction", "KEGG Enrichment", "GO Enrichment", "PPI Network",
-    "Summary Figure", "Analytical Validation", "Output"
+    "Target Prediction", "KEGG Enrichment", "GO Enrichment",
+    "Summary Figure", "Output"
   ),
   Tool_Package = c(
     "R 4.3 + Bioconductor",     "Python 3.10 + conda",
@@ -1394,9 +898,7 @@ pipeline_summary <- data.frame(
     "multiMiR::multiMiR",
     "clusterProfiler::enrichKEGG",
     "clusterProfiler::enrichGO + simplify",
-    "STRINGdb, igraph",
     "ggplot2 (forest plot)",
-    "ggplot2 (box plots, LOD curve)",
     "write.csv / saveRDS / sessionInfo"
   ),
   Key_Output = c(
@@ -1419,9 +921,7 @@ pipeline_summary <- data.frame(
     "validated_targets_strong_evidence.csv; AD_gene_targets.csv",
     "KEGG_enrichment_results.csv; kegg_dotplot.png",
     "GO_BP_enrichment_results.csv; go_bp_barplot.png",
-    "ppi_network.png; hub_genes_centrality.csv; Cytoscape exports",
     "biomarker_panel_forest_plot.png / .pdf",
-    "qpcr_validation_sim.png; lod_curve_sim.png; ddct results",
     "All results/Week6/ files; session_info_week6.txt"
   ),
   stringsAsFactors = FALSE
@@ -1468,12 +968,6 @@ if (nrow(ad_hits) > 0) {
   }
 }
 
-cat("\nGWAS AD risk genes in target set:\n")
-cat(paste(" ", gwas_overlap, collapse = "\n"), "\n")
-
-cat("\nHub genes by PPI degree centrality (top 5):\n")
-print(head(degree_df[, c("gene", "degree")], 5))
-
 cat("\n=== All Outputs Across All Weeks ===\n")
 all_result_dirs <- c("data/processed", "qc_reports", "results/Week3",
                      "results/Week4",  "results/Week5", "results/Week6")
@@ -1513,8 +1007,7 @@ cat("    Week 5: Machine learning classification and validation\n")
 cat("    Week 6: Biological interpretation and clinical translation\n")
 cat("\n")
 cat("  Biomarker panel: top 15 miRNAs, validated targets, pathway enrichment\n")
-cat("  PPI network: hub genes identified; AD gene overlay complete\n")
-cat("  qPCR validation simulation: ΔΔCt concordant with RNA-seq log2FC\n")
+cat("  Pathway analysis: KEGG and GO enrichment; AD pathway hsa05010 checked\n")
 cat("\n")
 cat("  Next steps for translational impact:\n")
 cat("    1. Verify top 3–5 miRNAs by ddPCR in a prospective clinical cohort\n")
