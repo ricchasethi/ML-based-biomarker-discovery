@@ -189,7 +189,7 @@ Open a terminal (macOS/Linux) or **Anaconda Prompt** (Windows):
 conda create -n biomarker_ml python=3.11
 conda activate biomarker_ml
 pip install pandas numpy scipy statsmodels scikit-learn matplotlib seaborn \
-            umap-learn shap xgboost lightgbm jupyterlab
+            umap-learn shap jupyterlab
 ```
 
 > You will need to run `conda activate biomarker_ml` at the start of every Python session.
@@ -382,40 +382,33 @@ ML-based-biomarker-discovery/
 ### Week 5 — Advanced ML & External Validation
 
 **Lecture write-up:** `Week5_AdvancedML_Validation.md`  
-**Lab script (R):** `Week5_Validation.R`  
-**Lab 5B (Python):** Reads harmonized matrices exported by `Week5_Validation.R`
+**Lab script:** `Week5_Validation.R`
 
 **What you will learn:**
 - Bias-variance tradeoff and the five most common forms of data leakage in bioinformatics
-- Nested cross-validation: why a single train/test split gives biased AUC when hyperparameters are tuned
-- XGBoost and LightGBM: gradient boosting intuition; key hyperparameters (learning rate, n_estimators, early stopping)
-- SHAP (Shapley Additive Explanations): interpreting individual-sample predictions from any model
+- Nested cross-validation with `caret`: unbiased AUC estimation and hyperparameter tuning
+- Two classifiers in R: Random Forest (`randomForest`) and LASSO logistic regression (`glmnet`)
+- SHAP feature importance in R using the `fastshap` package; beeswarm summary plot
 - Three-class classification (AD / MCI / Control): multiclass metrics and confusion matrices
 - Cross-platform harmonization: miRBaseConverter, MIMAT accession mapping, z-score standardisation
-- DeLong's test for AUC comparison between models (pROC package)
+- DeLong's test for AUC comparison between training CV and external validation (pROC package)
 - Calibration plots and Brier score: does the model's probability output mean what it says?
 - TRIPOD and STARD reporting guidelines for biomarker ML studies
 
-**Lab 5A tasks (RStudio, `Week5_Validation.R`):**
+**Lab tasks (RStudio, `Week5_Validation.R`, all sections in order):**
 1. Section 2: Load both datasets; harmonize miRNA names via miRBaseConverter
 2. Section 3: Find feature intersection between platforms
-3. Section 4: Apply per-dataset z-score standardisation
-4. Section 5: Export harmonized matrices for Python Lab 5B
-5. Section 6: DeLong AUC comparison test
-6. Section 7: Calibration plot (manual binning and Brier score)
-7. Section 8: Compile model results summary table
-
-**Lab 5B tasks (JupyterLab, Python):**
-1. Load harmonized matrices from `Week5_Validation.R`
-2. Implement nested cross-validation for logistic regression and random forest
-3. Train XGBoost; tune with early stopping
-4. Compute SHAP values; generate summary plot and beeswarm plot
-5. Apply the GSE120584-trained model to GSE46579 as external validation
-6. Report AUC with 95% bootstrapped confidence intervals
+3. Section 4: Apply per-dataset z-score standardisation; save harmonized RDS objects
+4. Section 6: Train Random Forest and LASSO via `caret` nested CV; extract fold predictions
+5. Section 7: Compute SHAP values with `fastshap`; save `shap_feature_importance.csv`
+6. Section 8: Apply models to GSE46579; DeLong's test (training CV AUC vs external AUC)
+7. Section 9: Calibration plots and Brier score
+8. Section 10: Compile and print model results summary table
 
 **Key output files produced:**
-- `data/processed/GSE120584_harmonized.rds`, `data/processed/GSE46579_harmonized.rds`
-- `results/calibration_plot.png`, `results/model_results_summary.csv`
+- `data/processed/harmonized_expr.rds`, `data/processed/metadata_harmonized.rds`
+- `results/Week5/shap_feature_importance.csv` (read by Week 6)
+- `results/Week5/roc_curves.png`, `results/Week5/model_performance_summary.csv`
 
 ---
 
@@ -476,7 +469,7 @@ Week 1: Week1_Setup_Template.R          ← one-time package installation
 Week 2: Week2_DataAcquisition_QC.R      ← downloads data; run with internet access
 Week 3: Week3_EDA.R                     ← then open Python for Lab 3B
 Week 4: Week4_DE_FeatureSelection.R     ← then open Week4_ML_Classifier.ipynb
-Week 5: Week5_Validation.R              ← then open Python for Lab 5B
+Week 5: Week5_Validation.R              ← complete ML pipeline in R
 Week 6: Week6_Interpretation.R          ← final week; reads all prior outputs
 ```
 

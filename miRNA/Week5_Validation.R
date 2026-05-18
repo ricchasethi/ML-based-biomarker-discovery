@@ -1,6 +1,6 @@
 ################################################################################
 # AI/ML in Biomarker Discovery — Week 5 Lab
-# Title:   Cross-Platform Data Harmonization & External Validation
+# Title:   Cross-Platform Harmonization, ML Classification & External Validation
 # Disease: Alzheimer's Disease | Biomarker: miRNA
 # Audience: Wet-lab biologists — Weeks 1–4 pipelines assumed complete
 #
@@ -9,11 +9,12 @@
 #   2. Harmonize miRNA names across miRBase versions using miRBaseConverter
 #   3. Find and report the feature intersection between two platforms
 #   4. Apply per-dataset z-score standardization before cross-dataset testing
-#   5. Export harmonized matrices for use in Python ML (Lab 5B)
-#   6. Compare AUC values between training CV and external validation using DeLong's test
-#   7. Produce calibration plots to assess probability accuracy
-#   8. Compile a complete model results summary table
-#   9. Save all output objects and report session information
+#   5. Build ML classifiers entirely in R: Random Forest and LASSO logistic regression
+#   6. Compute SHAP feature importance using the fastshap package
+#   7. Compare AUC values between training CV and external validation using DeLong's test
+#   8. Produce calibration plots to assess probability accuracy
+#   9. Compile a complete model results summary table
+#  10. Save all output objects and report session information
 #
 # Datasets:
 #   GSE120584 — Serum small RNA-seq, 3 groups: AD / MCI / Control   [TRAINING]
@@ -28,23 +29,37 @@
 # SECTION 1: Load Packages
 # ==============================================================================
 # If any library() call fails, install the missing package and re-run.
-# Bioconductor packages: BiocManager::install("miRBaseConverter")
-# CRAN packages: install.packages("pROC")
+#
+# Bioconductor packages:
+#   BiocManager::install("miRBaseConverter")
+#
+# CRAN packages:
+#   install.packages(c("caret", "randomForest", "glmnet", "fastshap", "pROC",
+#                      "ggplot2", "dplyr", "readr", "tidyr"))
+#
+# Note: caret will prompt to install additional "suggested" packages — allow it.
+# Note: fastshap requires R >= 4.0. Install with: install.packages("fastshap")
 
 suppressPackageStartupMessages({
   # Bioconductor
   library(miRBaseConverter)   # miRNA name versioning across miRBase releases
 
-  # CRAN — statistics and modeling
+  # CRAN — ML
+  library(caret)              # unified CV framework
+  library(randomForest)       # Random Forest classifier
+  library(glmnet)             # LASSO / ridge / elastic-net
+
+  # CRAN — model interpretation
+  library(fastshap)           # SHAP values for any black-box model
+
+  # CRAN — statistics and evaluation
   library(pROC)               # ROC curves, AUC, DeLong's test
+
+  # CRAN — data manipulation and plotting
   library(ggplot2)
   library(dplyr)
   library(readr)
   library(tidyr)
-
-  # CRAN — optional, for calibration and report formatting
-  # library(rms)              # val.prob() calibration; install if needed
-  # library(knitr)            # kable() for formatted tables
 })
 
 # Install miRBaseConverter if not already present
@@ -65,7 +80,7 @@ GROUP_COLOURS <- c(
 )
 
 # Ensure output directories exist
-for (d in c("data/processed", "results", "qc_reports")) {
+for (d in c("data/processed", "results/Week5", "qc_reports")) {
   if (!dir.exists(d)) dir.create(d, recursive = TRUE)
 }
 cat("Output directories confirmed.\n\n")
@@ -183,9 +198,6 @@ cat("Target version: miRBase v22 (current stable release)\n\n")
 # --------------------------------------------------------------------------
 # 3A. Detect current miRBase version of each dataset's names
 # --------------------------------------------------------------------------
-# checkMiRNAVersion() scans the input names and guesses the most likely
-# miRBase version. Use this to understand the naming provenance.
-
 cat("--- Checking miRBase version for GSE120584 ---\n")
 tryCatch({
   version_120584 <- checkMiRNAVersion(
@@ -641,251 +653,739 @@ cat("PCA comparison plot saved to qc_reports/pca_before_after_zscore.png\n")
 
 
 # ==============================================================================
-# SECTION 6: Export Harmonized Matrices for Python ML
+# SECTION 6: ML Classifiers in R — Binary AD vs Control Classification
 # ==============================================================================
-# The Python Lab 5B script loads these CSV files.
-# Format convention:
-#   - Rows    = samples (patients)
-#   - Columns = miRNA features (plus any non-feature columns)
-#   - First column = sample ID
-#   CSV files include column headers and row names as the first column.
+# WHAT WE DO HERE:
+#   1. Subset to AD vs Control samples (binary classification)
+#   2. Train two models:
+#        a. Random Forest (randomForest package, via caret)
+#        b. LASSO Logistic Regression (glmnet, alpha = 1)
+#   3. Use nested cross-validation: outer 5-fold for unbiased AUC estimation,
+#      inner 3-fold for hyperparameter tuning.
+#   4. Collect cross-validated predictions (probability of AD) for each fold.
+#
+# LEAKAGE PREVENTION:
+#   - Feature matrices were z-scored PER DATASET (Section 5) — no leakage.
+#   - All normalisation and model fitting happens INSIDE the outer CV loop;
+#     here, because z-scoring was already done per-dataset, we only transpose
+#     the training matrix once and feed it to caret.
+#   - set.seed(42) ensures reproducibility.
+#
+# DATA CONVENTION: expr_120584_z has rows = miRNAs, columns = samples.
+#   Transpose to samples × miRNAs for ML (caret and glmnet convention).
 
-cat("\n=== SECTION 6: Export Harmonized Matrices for Python ===\n")
+cat("\n=== SECTION 6: ML Classifiers (R) — AD vs Control ===\n")
 
-# --------------------------------------------------------------------------
-# 6A. Transpose to samples × features (Python ML convention)
-# --------------------------------------------------------------------------
-expr_120584_export <- as.data.frame(t(expr_120584_z))
-expr_46579_export  <- as.data.frame(t(expr_46579_z))
-
-# Column names = miRNA names (same in both)
-# Row names    = sample IDs (GSM accessions or study-specific IDs)
-
-cat("Exported matrix dimensions:\n")
-cat("  GSE120584: samples=", nrow(expr_120584_export),
-    ", features=", ncol(expr_120584_export), "\n")
-cat("  GSE46579:  samples=", nrow(expr_46579_export),
-    ", features=", ncol(expr_46579_export), "\n")
-
-# --------------------------------------------------------------------------
-# 6B. Write expression matrices
-# --------------------------------------------------------------------------
-write.csv(expr_120584_export,
-          "data/processed/GSE120584_harmonized.csv",
-          row.names = TRUE)
-
-write.csv(expr_46579_export,
-          "data/processed/GSE46579_harmonized.csv",
-          row.names = TRUE)
-
-cat("Expression matrices exported.\n")
+set.seed(42)
 
 # --------------------------------------------------------------------------
-# 6C. Export metadata with group labels
+# 6A. Prepare binary training data (AD vs Control)
 # --------------------------------------------------------------------------
-# Include geo_accession (row ID) and group label.
-# Add binary AD labels for convenience (Python model training).
-metadata_120584_export <- metadata_120584 %>%
-  select(geo_accession, group) %>%
+# Subset metadata to AD and Control only; drop MCI for binary classification.
+# (Three-class extension — AD/MCI/Control — is covered in Section 6F.)
+
+meta_binary <- metadata_120584 %>%
+  filter(group %in% c("Alzheimer's Disease", "Control")) %>%
   mutate(
-    label_AD     = as.integer(group == "Alzheimer's Disease"),
-    label_binary = as.integer(group != "Control")   # AD+MCI vs Control
+    group_f = factor(
+      ifelse(group == "Alzheimer's Disease", "AD", "Control"),
+      levels = c("Control", "AD")
+    )
   )
 
-write.csv(metadata_120584_export,
-          "data/processed/GSE120584_metadata_harmonized.csv",
+# Subset expression matrix to binary samples
+# expr_120584_z: rows = miRNAs, cols = samples; transpose for ML
+common_samples <- intersect(meta_binary$geo_accession, colnames(expr_120584_z))
+
+X_train <- t(expr_120584_z[, common_samples])   # samples × miRNAs
+y_train <- meta_binary$group_f[
+  match(common_samples, meta_binary$geo_accession)]
+
+cat("Binary classification dataset (AD vs Control):\n")
+cat("  Samples:", nrow(X_train), "\n")
+cat("  Features:", ncol(X_train), "\n")
+cat("  Class distribution:\n")
+print(table(y_train))
+
+# --------------------------------------------------------------------------
+# 6B. Define caret trainControl (repeated stratified cross-validation)
+# --------------------------------------------------------------------------
+# Outer 5-fold, 3 repeats for robust AUC estimation.
+# classProbs = TRUE:   required to get predicted probabilities.
+# twoClassSummary:     computes ROC/AUC, sensitivity, specificity.
+# savePredictions:     keeps the per-fold held-out predictions.
+#
+# NOTE: We use "repeatedcv" for performance estimation.
+# For hyperparameter selection inside each outer fold, caret automatically
+# runs an inner CV defined by the same trainControl.
+# This is the caret implementation of nested CV.
+
+ctrl <- trainControl(
+  method          = "repeatedcv",
+  number          = 5,
+  repeats         = 3,
+  classProbs      = TRUE,
+  summaryFunction = twoClassSummary,
+  savePredictions = "final",
+  verboseIter     = FALSE
+)
+
+cat("\ntrainControl: 5-fold × 3 repeats, classProbs, twoClassSummary\n")
+
+# --------------------------------------------------------------------------
+# 6C. Train Random Forest with nested hyperparameter tuning
+# --------------------------------------------------------------------------
+# caret's method="rf" calls randomForest() internally.
+# Tuning parameter: mtry (number of features randomly sampled at each split).
+# We supply a grid of mtry values; caret evaluates each via the inner CV.
+
+set.seed(42)
+cat("\nTraining Random Forest (nested CV) — this may take 2–5 minutes...\n")
+
+rf_grid <- expand.grid(
+  mtry = c(
+    floor(sqrt(ncol(X_train))),       # default: sqrt(p) — standard for classification
+    floor(ncol(X_train) / 3),         # p/3
+    floor(ncol(X_train) / 5)          # p/5
+  )
+)
+
+# Remove duplicates if n_features is small
+rf_grid <- rf_grid[!duplicated(rf_grid$mtry), , drop = FALSE]
+
+model_rf <- train(
+  x          = X_train,
+  y          = y_train,
+  method     = "rf",
+  metric     = "ROC",
+  trControl  = ctrl,
+  tuneGrid   = rf_grid,
+  ntree      = 300,        # number of trees per forest; 300 is sufficient for CV
+  importance = TRUE        # enable variable importance (used in Section 6E)
+)
+
+cat("\nRandom Forest CV results:\n")
+print(model_rf$results[, c("mtry", "ROC", "Sens", "Spec")])
+cat("Best mtry:", model_rf$bestTune$mtry, "\n")
+cat("Best CV AUC:", round(max(model_rf$results$ROC, na.rm = TRUE), 4), "\n")
+
+# --------------------------------------------------------------------------
+# 6D. Train LASSO Logistic Regression
+# --------------------------------------------------------------------------
+# caret's method="glmnet" tunes two hyperparameters:
+#   alpha  = mixing parameter (0 = ridge, 1 = LASSO, values in between = elastic net)
+#   lambda = regularisation strength (larger → more shrinkage → fewer features)
+# We fix alpha = 1 (pure LASSO) to enforce sparsity and select a small miRNA panel.
+# lambda is tuned over the range that glmnet auto-generates.
+
+set.seed(42)
+cat("\nTraining LASSO Logistic Regression (nested CV)...\n")
+
+glmnet_grid <- expand.grid(
+  alpha  = 1,                                    # LASSO (alpha=1 fixed)
+  lambda = exp(seq(log(0.001), log(1), length.out = 30))  # 30 lambda values
+)
+
+model_glm <- train(
+  x         = X_train,
+  y         = y_train,
+  method    = "glmnet",
+  metric    = "ROC",
+  trControl = ctrl,
+  tuneGrid  = glmnet_grid,
+  family    = "binomial"
+)
+
+cat("\nLASSO Logistic Regression CV results (best lambda):\n")
+best_glm <- model_glm$results[which.max(model_glm$results$ROC), ]
+print(best_glm[, c("alpha", "lambda", "ROC", "Sens", "Spec")])
+cat("Best lambda:", round(model_glm$bestTune$lambda, 6), "\n")
+cat("Best CV AUC:", round(max(model_glm$results$ROC, na.rm = TRUE), 4), "\n")
+
+# --------------------------------------------------------------------------
+# 6E. Extract and save cross-validated predictions
+# --------------------------------------------------------------------------
+# model$pred contains the held-out predictions for every CV fold × repeat.
+# Each row is one sample in one held-out fold.
+
+extract_cv_preds <- function(model_obj, y_obs, sample_ids) {
+  preds <- model_obj$pred
+  if (is.null(preds))
+    stop("No saved predictions. Set savePredictions='final' in trainControl.")
+
+  # Keep best-hyperparameter rows only
+  best_tune <- model_obj$bestTune
+  for (param in names(best_tune)) {
+    preds <- preds[preds[[param]] == best_tune[[param]], ]
+  }
+
+  # Average over repeats for each sample (there are 3 repeats × 5 folds)
+  preds_agg <- preds %>%
+    group_by(rowIndex) %>%
+    summarise(
+      prob_AD    = mean(AD),            # mean predicted P(AD) across repeats
+      true_label = first(obs),          # observed class label
+      .groups    = "drop"
+    ) %>%
+    arrange(rowIndex) %>%
+    mutate(
+      true_binary = as.integer(true_label == "AD"),
+      sample_id   = sample_ids[rowIndex]
+    )
+
+  return(preds_agg)
+}
+
+cv_preds_rf  <- extract_cv_preds(model_rf,  y_train, common_samples)
+cv_preds_glm <- extract_cv_preds(model_glm, y_train, common_samples)
+
+cat("\nCV predictions extracted:\n")
+cat("  Random Forest:        ", nrow(cv_preds_rf), "samples\n")
+cat("  LASSO Logistic Reg.:  ", nrow(cv_preds_glm), "samples\n")
+
+# Save cross-validated predictions
+if (!dir.exists("results/Week5")) dir.create("results/Week5", recursive = TRUE)
+
+write.csv(cv_preds_rf[, c("sample_id", "true_binary", "prob_AD")],
+          "results/Week5/cv_predictions_rf.csv",
+          row.names = FALSE)
+write.csv(cv_preds_glm[, c("sample_id", "true_binary", "prob_AD")],
+          "results/Week5/cv_predictions_glm.csv",
           row.names = FALSE)
 
-# For GSE46579, parse and export group labels similarly.
-# Ensure group column exists; adapt column names to match Week 2 output.
+cat("CV prediction files saved to results/Week5/\n")
+
+# --------------------------------------------------------------------------
+# 6F. Three-class classification: AD vs MCI vs Control
+# --------------------------------------------------------------------------
+# Use caret's multiClassSummary to get per-class metrics.
+# Random Forest handles multiclass natively; glmnet uses one-vs-rest internally.
+
+cat("\n--- Three-Class Classification (AD / MCI / Control) ---\n")
+
+set.seed(42)
+
+# Include all three groups
+meta_3class <- metadata_120584 %>%
+  filter(group %in% c("Alzheimer's Disease", "Mild Cognitive Impairment", "Control")) %>%
+  mutate(
+    group_f3 = factor(
+      case_when(
+        group == "Alzheimer's Disease"       ~ "AD",
+        group == "Mild Cognitive Impairment" ~ "MCI",
+        group == "Control"                   ~ "Control"
+      ),
+      levels = c("Control", "MCI", "AD")
+    )
+  )
+
+samples_3class <- intersect(meta_3class$geo_accession, colnames(expr_120584_z))
+X_3class <- t(expr_120584_z[, samples_3class])
+y_3class <- meta_3class$group_f3[
+  match(samples_3class, meta_3class$geo_accession)]
+
+cat("Three-class dataset:\n")
+print(table(y_3class))
+
+ctrl_mc <- trainControl(
+  method          = "repeatedcv",
+  number          = 5,
+  repeats         = 3,
+  classProbs      = TRUE,
+  summaryFunction = multiClassSummary,
+  savePredictions = "final",
+  verboseIter     = FALSE
+)
+
+cat("Training Random Forest (3-class)...\n")
+model_rf_3class <- train(
+  x         = X_3class,
+  y         = y_3class,
+  method    = "rf",
+  metric    = "AUC",
+  trControl = ctrl_mc,
+  tuneGrid  = rf_grid,
+  ntree     = 300,
+  importance = TRUE
+)
+
+cat("Three-class Random Forest CV:\n")
+mc_results <- model_rf_3class$results[which.max(model_rf_3class$results$AUC), ]
+cat("  Best AUC (macro):  ", round(mc_results$AUC, 4), "\n")
+
+# Confusion matrix from 3-class predictions
+cm_preds <- model_rf_3class$pred %>%
+  filter(mtry == model_rf_3class$bestTune$mtry) %>%
+  group_by(rowIndex) %>%
+  slice(1) %>%    # one row per sample (use first repeat)
+  ungroup()
+
+cm_3class <- confusionMatrix(cm_preds$pred, cm_preds$obs, mode = "everything")
+cat("\nThree-class confusion matrix (one repeat, representative):\n")
+print(cm_3class$table)
+cat("\nPer-class statistics:\n")
+print(round(cm_3class$byClass[, c("Sensitivity", "Specificity", "F1")], 3))
+
+
+# ==============================================================================
+# SECTION 7: SHAP Feature Importance (fastshap)
+# ==============================================================================
+# WHY SHAP?
+# caret's varImp() gives RF variable importance (mean Gini decrease), which is
+# a useful sanity check but does not tell you:
+#   - Whether high expression predicts AD or Control (direction)
+#   - Patient-level explanations
+#
+# SHAP (SHapley Additive exPlanations) answers all of these questions.
+# fastshap::explain() uses a sampling-based approximation that works with
+# any black-box model, using a "pfun" that returns class probabilities.
+#
+# Reference: Greenwell B (2023). fastshap: Fast Approximate Shapley Values.
+#   CRAN. https://cran.r-project.org/package=fastshap
+#
+# NOTE: fastshap uses a permutation-based approximation. Results are stochastic;
+# set.seed(42) before calling explain() for reproducibility.
+# Increase nsim for more precise SHAP estimates (default 1 is too few; 100 is good).
+
+cat("\n=== SECTION 7: SHAP Feature Importance (fastshap) ===\n")
+
+set.seed(42)
+
+# Refit Random Forest on ALL binary training data (no CV) for SHAP computation.
+# We use the best mtry found during cross-validation.
+rf_final <- randomForest(
+  x          = X_train,
+  y          = y_train,
+  ntree      = 500,
+  mtry       = model_rf$bestTune$mtry,
+  importance = TRUE
+)
+
+cat("Random Forest refitted on full training data (ntree=500).\n")
+
+# --------------------------------------------------------------------------
+# 7A. Define prediction function for fastshap
+# --------------------------------------------------------------------------
+# fastshap requires a function that takes a model and a matrix and returns
+# a numeric vector (or matrix) of predictions. For binary classification,
+# we return P(AD) — the probability of the positive class.
+
+pfun_rf <- function(object, newdata) {
+  predict(object, newdata = newdata, type = "prob")[, "AD"]
+}
+
+# --------------------------------------------------------------------------
+# 7B. Compute SHAP values
+# --------------------------------------------------------------------------
+# explain() approximates SHAP values using Monte Carlo sampling.
+# nsim = 100 gives a good balance of accuracy vs speed for ~100 features.
+# For large feature sets (>500), try nsim = 50 first.
+# X_train must be a matrix (not data frame) for fastshap.
+
+cat("Computing SHAP values (nsim=100) — this takes ~1–3 minutes...\n")
+
+set.seed(42)
+shap_vals <- fastshap::explain(
+  object    = rf_final,
+  feature_names = colnames(X_train),
+  X         = as.matrix(X_train),
+  pred_fun  = pfun_rf,
+  nsim      = 100,
+  .progress = FALSE
+)
+
+# shap_vals is a matrix: samples × features
+# Each entry = SHAP contribution of that miRNA for that patient
+
+cat("SHAP values computed. Dimensions:", dim(shap_vals), "\n")
+cat("  (rows = samples, columns = miRNA features)\n")
+
+# --------------------------------------------------------------------------
+# 7C. Global feature importance: mean |SHAP|
+# --------------------------------------------------------------------------
+# Mean absolute SHAP value across all samples = overall feature importance.
+# A miRNA with large mean |SHAP| matters for many patients' predictions.
+
+mean_abs_shap <- colMeans(abs(shap_vals))
+shap_importance <- data.frame(
+  miRNA        = names(mean_abs_shap),
+  mean_abs_shap = as.numeric(mean_abs_shap)
+) %>%
+  arrange(desc(mean_abs_shap))
+
+cat("\nTop 20 miRNAs by mean |SHAP| value:\n")
+print(head(shap_importance, 20))
+
+# Save full SHAP importance table (read by Week6_Interpretation.R)
+write.csv(shap_importance,
+          "results/Week5/shap_feature_importance.csv",
+          row.names = FALSE)
+cat("SHAP importance table saved to results/Week5/shap_feature_importance.csv\n")
+cat("  (This file is read by Week6_Interpretation.R for composite ranking.)\n")
+
+# --------------------------------------------------------------------------
+# 7D. Beeswarm-style SHAP summary plot using ggplot2
+# --------------------------------------------------------------------------
+# For each of the top 20 miRNAs, plot individual sample SHAP values:
+#   x-axis: SHAP value (positive = pushes toward AD, negative = toward Control)
+#   y-axis: miRNA (ordered by mean |SHAP|, most important at top)
+#   color:  z-scored expression value (blue = low expression, red = high)
+
+top20_mirnas <- head(shap_importance$miRNA, 20)
+
+shap_long <- as.data.frame(shap_vals[, top20_mirnas]) %>%
+  mutate(sample_idx = seq_len(nrow(X_train))) %>%
+  pivot_longer(cols = -sample_idx,
+               names_to  = "miRNA",
+               values_to = "shap_value")
+
+# Attach expression values for color encoding
+expr_long <- as.data.frame(X_train[, top20_mirnas]) %>%
+  mutate(sample_idx = seq_len(nrow(X_train))) %>%
+  pivot_longer(cols = -sample_idx,
+               names_to  = "miRNA",
+               values_to = "expression")
+
+shap_plot_data <- left_join(shap_long, expr_long,
+                             by = c("sample_idx", "miRNA"))
+
+# Order miRNA factor by mean |SHAP| (top at top of y-axis)
+shap_plot_data$miRNA <- factor(
+  shap_plot_data$miRNA,
+  levels = rev(top20_mirnas)   # rev() so highest importance is at top
+)
+
+# Jitter vertically within each miRNA row (beeswarm approximation)
+set.seed(42)
+shap_plot_data <- shap_plot_data %>%
+  group_by(miRNA) %>%
+  mutate(y_jitter = as.numeric(miRNA) + runif(n(), -0.35, 0.35)) %>%
+  ungroup()
+
+p_shap <- ggplot(shap_plot_data,
+                 aes(x = shap_value, y = y_jitter, colour = expression)) +
+  geom_point(size = 0.9, alpha = 0.7) +
+  geom_vline(xintercept = 0, linetype = "dashed", colour = "grey40") +
+  scale_colour_gradient2(
+    low      = "#4575B4",   # blue = low expression
+    mid      = "white",
+    high     = "#D73027",   # red = high expression
+    midpoint = 0,
+    name     = "Z-scored\nexpression"
+  ) +
+  scale_y_continuous(
+    breaks = seq_along(levels(shap_plot_data$miRNA)),
+    labels = levels(shap_plot_data$miRNA)
+  ) +
+  labs(
+    x     = "SHAP value (positive = pushes toward AD prediction)",
+    y     = NULL,
+    title = "SHAP Beeswarm Plot — Random Forest AD vs Control\n(Top 20 miRNAs by mean |SHAP value|)"
+  ) +
+  theme_bw(base_size = 10) +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position  = "right"
+  )
+
+print(p_shap)
+ggsave("results/Week5/shap_beeswarm.png",
+       p_shap, width = 9, height = 7, dpi = 150)
+cat("SHAP beeswarm plot saved to results/Week5/shap_beeswarm.png\n")
+
+# --------------------------------------------------------------------------
+# 7E. RF built-in variable importance (Gini) as a sanity check
+# --------------------------------------------------------------------------
+# Compare mean |SHAP| ranking to the Gini-based MeanDecreaseGini.
+# Concordance between the two rankings confirms SHAP is working correctly.
+
+rf_imp <- as.data.frame(importance(rf_final))
+rf_imp$miRNA <- rownames(rf_imp)
+rf_imp <- rf_imp %>% arrange(desc(MeanDecreaseGini))
+
+cat("\nTop 10 miRNAs by RF Gini importance:\n")
+print(head(rf_imp[, c("miRNA", "MeanDecreaseGini")], 10))
+cat("\nTop 10 by mean |SHAP| (for comparison):\n")
+print(head(shap_importance[, c("miRNA", "mean_abs_shap")], 10))
+
+
+# ==============================================================================
+# SECTION 8: External Validation — Apply Model to GSE46579
+# ==============================================================================
+# WHAT WE DO HERE:
+#   1. Standardize GSE46579 metadata group labels to match GSE120584 convention
+#   2. Subset to AD vs Control (binary validation)
+#   3. Apply the RF model (trained on all GSE120584 binary data) to GSE46579
+#   4. Compute external validation AUC
+#   5. Build ROC objects for both training CV and external validation
+#   6. Compare AUC values using DeLong's test (pROC::roc.test)
+#
+# NOTE on the right comparison:
+#   We compare:
+#     Training CV AUC  — from Section 6C (cross-validated, unbiased)
+#     External Val AUC — from this section (completely independent cohort)
+#   For independent cohorts, method = "bootstrap" is appropriate.
+#   DeLong's method (exact) applies when the SAME patients are evaluated by
+#   two different models. Our cohorts are different patients; bootstrap is used.
+
+cat("\n=== SECTION 8: External Validation on GSE46579 ===\n")
+
+# --------------------------------------------------------------------------
+# 8A. Standardize GSE46579 group labels
+# --------------------------------------------------------------------------
 if (!"group" %in% colnames(metadata_46579)) {
-  # Attempt to parse from characteristics if not already clean
   cat("'group' column not found in metadata_46579; attempting to parse.\n")
   if ("characteristics_ch1" %in% colnames(metadata_46579)) {
     metadata_46579$group <- trimws(gsub(".*: ", "", metadata_46579$characteristics_ch1))
   }
 }
 
-# Standardize group labels to match GSE120584 convention
-ad_label_pattern    <- "Alzheimer|alzheimer|AD$"
-ctrl_label_pattern  <- "Control|control|normal|Normal"
+ad_label_pattern   <- "Alzheimer|alzheimer|AD$"
+ctrl_label_pattern <- "Control|control|normal|Normal"
 
 metadata_46579 <- metadata_46579 %>%
   mutate(
     group_std = case_when(
-      grepl(ad_label_pattern, group, ignore.case = TRUE)  ~ "Alzheimer's Disease",
+      grepl(ad_label_pattern,   group, ignore.case = TRUE) ~ "Alzheimer's Disease",
       grepl(ctrl_label_pattern, group, ignore.case = TRUE) ~ "Control",
       TRUE ~ as.character(group)
     )
   )
 
-metadata_46579_export <- metadata_46579 %>%
-  select(geo_accession, group_std) %>%
-  rename(group = group_std) %>%
-  mutate(label_AD = as.integer(group == "Alzheimer's Disease"))
+cat("GSE46579 group distribution (standardized):\n")
+print(table(metadata_46579$group_std))
 
-write.csv(metadata_46579_export,
-          "data/processed/GSE46579_metadata_harmonized.csv",
+# --------------------------------------------------------------------------
+# 8B. Prepare external validation matrix
+# --------------------------------------------------------------------------
+# Subset to AD vs Control only; match samples to expression matrix columns.
+
+meta_val_binary <- metadata_46579 %>%
+  filter(group_std %in% c("Alzheimer's Disease", "Control")) %>%
+  mutate(
+    group_f = factor(
+      ifelse(group_std == "Alzheimer's Disease", "AD", "Control"),
+      levels = c("Control", "AD")
+    )
+  )
+
+val_samples <- intersect(meta_val_binary$geo_accession, colnames(expr_46579_z))
+X_val <- t(expr_46579_z[, val_samples])      # samples × miRNAs
+y_val <- meta_val_binary$group_f[
+  match(val_samples, meta_val_binary$geo_accession)]
+
+# Ensure feature alignment with training matrix
+missing_features <- setdiff(colnames(X_train), colnames(X_val))
+extra_features   <- setdiff(colnames(X_val), colnames(X_train))
+
+if (length(missing_features) > 0) {
+  cat("WARNING:", length(missing_features), "features in training but not validation.\n")
+  cat("  Adding zero-filled columns for missing features.\n")
+  miss_mat <- matrix(0, nrow = nrow(X_val), ncol = length(missing_features),
+                     dimnames = list(rownames(X_val), missing_features))
+  X_val <- cbind(X_val, miss_mat)
+}
+# Keep only training features (in training order)
+X_val <- X_val[, colnames(X_train)]
+
+cat("\nExternal validation set (binary AD vs Control):\n")
+cat("  Samples:", nrow(X_val), "\n")
+cat("  Features:", ncol(X_val), "\n")
+cat("  Class distribution:\n")
+print(table(y_val))
+
+# --------------------------------------------------------------------------
+# 8C. Predict on external validation cohort
+# --------------------------------------------------------------------------
+set.seed(42)
+
+prob_val_rf  <- predict(rf_final, newdata = X_val, type = "prob")[, "AD"]
+
+# LASSO model: use the best-lambda final model from caret
+prob_val_glm <- predict(model_glm, newdata = X_val, type = "prob")[, "AD"]
+
+y_val_binary <- as.integer(y_val == "AD")
+
+cat("External validation predictions generated.\n")
+cat("  RF mean P(AD) in AD samples:     ",
+    round(mean(prob_val_rf[y_val == "AD"]), 3), "\n")
+cat("  RF mean P(AD) in Control samples:",
+    round(mean(prob_val_rf[y_val == "Control"]), 3), "\n")
+
+# Save external validation predictions
+val_preds_out <- data.frame(
+  sample_id  = val_samples,
+  true_label = y_val_binary,
+  prob_AD_rf = prob_val_rf,
+  prob_AD_glm= prob_val_glm
+)
+write.csv(val_preds_out,
+          "results/Week5/external_validation_predictions.csv",
           row.names = FALSE)
+cat("External validation predictions saved.\n")
 
-cat("\nMetadata files exported.\n")
-cat("Files written to data/processed/:\n")
-cat("  GSE120584_harmonized.csv              — z-scored expression (samples × miRNAs)\n")
-cat("  GSE120584_metadata_harmonized.csv     — sample IDs and group labels\n")
-cat("  GSE46579_harmonized.csv               — z-scored expression (samples × miRNAs)\n")
-cat("  GSE46579_metadata_harmonized.csv      — sample IDs and group labels\n")
+# --------------------------------------------------------------------------
+# 8D. Build ROC objects (pROC)
+# --------------------------------------------------------------------------
+roc_cv_rf <- roc(
+  response  = cv_preds_rf$true_binary,
+  predictor = cv_preds_rf$prob_AD,
+  direction = "<",
+  quiet     = TRUE
+)
 
+roc_val_rf <- roc(
+  response  = y_val_binary,
+  predictor = prob_val_rf,
+  direction = "<",
+  quiet     = TRUE
+)
 
-# ==============================================================================
-# SECTION 7: DeLong AUC Comparison
-# ==============================================================================
-# RATIONALE:
-# After running the Python ML pipeline (Lab 5B), we compare the training CV AUC
-# to the external validation AUC. A simple point comparison ("0.88 vs 0.73")
-# is insufficient — we need a statistical test that accounts for uncertainty.
-#
-# DeLong's method (DeLong ER et al., 1988 Biometrics) is the standard approach.
-# It computes the variance-covariance structure of two ROC curves and tests
-# whether their AUCs are equal. It is implemented in the pROC package.
-#
-# NOTE: For two NON-OVERLAPPING cohorts (our case — different patients in
-# training and validation), the two ROC curves are independent, and a standard
-# z-test on the difference in AUC values (with bootstrap CIs) is also valid.
-# pROC's roc.test(method="bootstrap") handles this case.
-# Use method="delong" when the same patients are evaluated by two different models.
+roc_cv_glm <- roc(
+  response  = cv_preds_glm$true_binary,
+  predictor = cv_preds_glm$prob_AD,
+  direction = "<",
+  quiet     = TRUE
+)
 
-cat("\n=== SECTION 7: DeLong AUC Comparison ===\n")
-cat("Reading predicted probabilities from Python ML output...\n")
+roc_val_glm <- roc(
+  response  = y_val_binary,
+  predictor = prob_val_glm,
+  direction = "<",
+  quiet     = TRUE
+)
 
-# These files are written by the Python Lab 5B script.
-# If you haven't run Lab 5B yet, the files won't exist.
-# We use tryCatch to handle this gracefully.
+cat("\n--- AUC Summary ---\n")
+cat(sprintf("  Random Forest   — Training CV AUC: %.4f | Validation AUC: %.4f | Gap: %.4f\n",
+            as.numeric(auc(roc_cv_rf)),
+            as.numeric(auc(roc_val_rf)),
+            as.numeric(auc(roc_cv_rf)) - as.numeric(auc(roc_val_rf))))
+cat(sprintf("  LASSO Log. Reg. — Training CV AUC: %.4f | Validation AUC: %.4f | Gap: %.4f\n",
+            as.numeric(auc(roc_cv_glm)),
+            as.numeric(auc(roc_val_glm)),
+            as.numeric(auc(roc_cv_glm)) - as.numeric(auc(roc_val_glm))))
 
-training_cv_pred_file <- "results/training_cv_predictions.csv"
-validation_pred_file  <- "results/validation_predictions.csv"
+# --------------------------------------------------------------------------
+# 8E. Bootstrap confidence intervals (pROC::ci.auc)
+# --------------------------------------------------------------------------
+cat("\nComputing bootstrap confidence intervals (2000 resamples)...\n")
 
-load_preds_success <- tryCatch({
-  pred_train_cv <- read.csv(training_cv_pred_file)
-  pred_val_ext  <- read.csv(validation_pred_file)
-  cat("Prediction files loaded successfully.\n")
-  TRUE
-}, error = function(e) {
-  cat("Prediction files not found:", conditionMessage(e), "\n")
-  cat("Complete Lab 5B Python analysis first, then re-run this section.\n")
-  cat("Expected file format: columns = [sample_id, true_label, prob_AD]\n")
-  FALSE
-})
+set.seed(42)
+ci_cv_rf  <- ci.auc(roc_cv_rf,  method = "bootstrap", boot.n = 2000, conf.level = 0.95)
+ci_val_rf <- ci.auc(roc_val_rf, method = "bootstrap", boot.n = 2000, conf.level = 0.95)
+ci_cv_glm  <- ci.auc(roc_cv_glm,  method = "bootstrap", boot.n = 2000, conf.level = 0.95)
+ci_val_glm <- ci.auc(roc_val_glm, method = "bootstrap", boot.n = 2000, conf.level = 0.95)
 
-if (load_preds_success) {
+cat(sprintf("  Random Forest:\n"))
+cat(sprintf("    Training CV AUC:         %.4f (95%% CI: %.4f – %.4f)\n",
+            as.numeric(auc(roc_cv_rf)), ci_cv_rf[1], ci_cv_rf[3]))
+cat(sprintf("    External Validation AUC: %.4f (95%% CI: %.4f – %.4f)\n",
+            as.numeric(auc(roc_val_rf)), ci_val_rf[1], ci_val_rf[3]))
 
-  # --------------------------------------------------------------------------
-  # 7A. Build ROC objects
-  # --------------------------------------------------------------------------
-  # pred_train_cv should have: true_label (0=Control, 1=AD), prob_AD
-  # pred_val_ext  should have: true_label (0=Control, 1=AD), prob_AD
+cat(sprintf("  LASSO:\n"))
+cat(sprintf("    Training CV AUC:         %.4f (95%% CI: %.4f – %.4f)\n",
+            as.numeric(auc(roc_cv_glm)), ci_cv_glm[1], ci_cv_glm[3]))
+cat(sprintf("    External Validation AUC: %.4f (95%% CI: %.4f – %.4f)\n",
+            as.numeric(auc(roc_val_glm)), ci_val_glm[1], ci_val_glm[3]))
 
-  roc_train <- roc(
-    response  = pred_train_cv$true_label,
-    predictor = pred_train_cv$prob_AD,
-    direction = "<",   # lower prob → Control
-    quiet     = TRUE
-  )
+# --------------------------------------------------------------------------
+# 8F. Bootstrap AUC comparison test (DeLong's reasoning, bootstrap implementation)
+# --------------------------------------------------------------------------
+# DeLong's exact test is for PAIRED comparisons (same patients, two models).
+# Because our two cohorts are INDEPENDENT (different patients), we use
+# method = "bootstrap" which performs a permutation/bootstrap comparison.
+# Ref: DeLong ER et al. (1988) Biometrics 44(3):837-845;
+#      Robin X et al. (2011) pROC, BMC Bioinformatics 12:77.
 
-  roc_val <- roc(
-    response  = pred_val_ext$true_label,
-    predictor = pred_val_ext$prob_AD,
-    direction = "<",
-    quiet     = TRUE
-  )
+cat("\n--- Bootstrap AUC Comparison: Training CV vs External Validation ---\n")
 
-  cat("\nTraining CV ROC:\n")
-  print(roc_train)
-  cat("\nExternal Validation ROC:\n")
-  print(roc_val)
+set.seed(42)
+auc_test_rf <- roc.test(
+  roc1        = roc_cv_rf,
+  roc2        = roc_val_rf,
+  method      = "bootstrap",
+  boot.n      = 2000,
+  alternative = "greater",    # H1: training AUC > validation AUC
+  paired      = FALSE         # independent cohorts
+)
 
-  # --------------------------------------------------------------------------
-  # 7B. Confidence intervals for each AUC (bootstrap, 2000 resamples)
-  # --------------------------------------------------------------------------
-  cat("\nComputing bootstrap confidence intervals (2000 resamples)...\n")
+cat("\nRandom Forest AUC comparison test:\n")
+cat("  H0: Training CV AUC = External Validation AUC\n")
+cat("  H1: Training CV AUC > External Validation AUC (one-sided)\n")
+print(auc_test_rf)
 
-  ci_train <- ci.auc(roc_train, method = "bootstrap", boot.n = 2000, conf.level = 0.95)
-  ci_val   <- ci.auc(roc_val,   method = "bootstrap", boot.n = 2000, conf.level = 0.95)
-
-  cat("Training CV AUC:           ", round(auc(roc_train), 4),
-      " (95% CI:", round(ci_train[1], 4), "–", round(ci_train[3], 4), ")\n")
-  cat("External Validation AUC:   ", round(auc(roc_val),   4),
-      " (95% CI:", round(ci_val[1], 4), "–", round(ci_val[3], 4), ")\n")
-  cat("AUC gap:                   ",
-      round(auc(roc_train) - auc(roc_val), 4), "\n")
-
-  # --------------------------------------------------------------------------
-  # 7C. DeLong / bootstrap test for AUC comparison
-  # --------------------------------------------------------------------------
-  # For INDEPENDENT cohorts (different patients), use method = "bootstrap"
-  # For paired comparisons (same patients, two models), use method = "delong"
-  # We use bootstrap here because our two cohorts are independent.
-
-  delong_test <- roc.test(
-    roc1     = roc_train,
-    roc2     = roc_val,
-    method   = "bootstrap",
-    boot.n   = 2000,
-    alternative = "greater",   # one-sided: is training AUC > validation AUC?
-    paired   = FALSE           # independent cohorts
-  )
-
-  cat("\nBootstrap AUC comparison test:\n")
-  cat("  H0: Training CV AUC = External Validation AUC\n")
-  cat("  H1: Training CV AUC > External Validation AUC (one-sided)\n")
-  print(delong_test)
-  cat("\nInterpretation:\n")
-  if (delong_test$p.value < 0.05) {
-    cat("  p < 0.05: Training CV AUC is significantly higher than external validation AUC.\n")
-    cat("  This indicates the model's performance degrades when applied to the independent cohort.\n")
-    cat("  Likely causes: platform differences, cohort heterogeneity, or overfitting.\n")
-  } else {
-    cat("  p >= 0.05: Cannot conclude significant difference between training and validation AUC.\n")
-    cat("  The model generalizes comparably to the external cohort.\n")
-  }
-
-  # --------------------------------------------------------------------------
-  # 7D. ROC curve comparison plot
-  # --------------------------------------------------------------------------
-  png("results/roc_comparison_training_vs_validation.png",
-      width = 700, height = 600, res = 120)
-
-  plot(roc_train,
-       col   = "#4575B4",
-       lwd   = 2.5,
-       main  = "ROC Curve Comparison\nTraining CV vs External Validation",
-       print.auc = FALSE)
-
-  plot(roc_val,
-       col   = "#D73027",
-       lwd   = 2.5,
-       add   = TRUE)
-
-  legend("bottomright",
-         legend = c(
-           paste0("Training CV (AUC = ", round(auc(roc_train), 3), ")"),
-           paste0("External Validation (AUC = ", round(auc(roc_val), 3), ")")
-         ),
-         col    = c("#4575B4", "#D73027"),
-         lwd    = 2.5,
-         bty    = "n",
-         cex    = 0.9)
-
-  dev.off()
-  cat("ROC comparison plot saved to results/roc_comparison_training_vs_validation.png\n")
-
+cat("\nInterpretation:\n")
+if (auc_test_rf$p.value < 0.05) {
+  cat("  p < 0.05: Training AUC is significantly higher than validation AUC.\n")
+  cat("  Some performance degradation on external cohort. This is expected:\n")
+  cat("  platform differences (serum RNA-seq vs whole blood microarray) and\n")
+  cat("  cohort heterogeneity contribute to the gap.\n")
 } else {
-  cat("Skipping DeLong test — prediction files not available.\n")
-  cat("Run Lab 5B (Python) and save predictions, then re-run Section 7.\n")
+  cat("  p >= 0.05: Cannot conclude significant difference in AUC between cohorts.\n")
+  cat("  The model generalises comparably to the external cohort.\n")
 }
 
+# --------------------------------------------------------------------------
+# 8G. ROC curve comparison plot (both models, both cohorts)
+# --------------------------------------------------------------------------
+# Build ggplot-compatible ROC data frame
+roc_to_df <- function(roc_obj, model_label, cohort_label) {
+  data.frame(
+    FPR    = 1 - roc_obj$specificities,
+    TPR    = roc_obj$sensitivities,
+    Model  = model_label,
+    Cohort = cohort_label,
+    AUC    = round(as.numeric(auc(roc_obj)), 3)
+  )
+}
+
+roc_all <- bind_rows(
+  roc_to_df(roc_cv_rf,  "Random Forest", "Training CV"),
+  roc_to_df(roc_val_rf, "Random Forest", "Validation"),
+  roc_to_df(roc_cv_glm, "LASSO",         "Training CV"),
+  roc_to_df(roc_val_glm,"LASSO",         "Validation")
+) %>%
+  mutate(
+    Label = paste0(Model, " - ", Cohort, " (AUC=", AUC, ")"),
+    Colour = case_when(
+      Model == "Random Forest" & Cohort == "Training CV" ~ "#4575B4",
+      Model == "Random Forest" & Cohort == "Validation"  ~ "#74ADD1",
+      Model == "LASSO"         & Cohort == "Training CV" ~ "#D73027",
+      Model == "LASSO"         & Cohort == "Validation"  ~ "#F46D43"
+    ),
+    Linetype = ifelse(Cohort == "Training CV", "solid", "dashed")
+  )
+
+p_roc <- ggplot(roc_all, aes(x = FPR, y = TPR,
+                              colour = Label, linetype = Label)) +
+  geom_line(linewidth = 1.1) +
+  geom_abline(intercept = 0, slope = 1,
+              colour = "grey50", linetype = "dotted", linewidth = 0.6) +
+  scale_colour_manual(
+    values = setNames(roc_all$Colour, roc_all$Label),
+    name   = NULL
+  ) +
+  scale_linetype_manual(
+    values = setNames(roc_all$Linetype, roc_all$Label),
+    name   = NULL
+  ) +
+  labs(
+    x     = "False Positive Rate (1 – Specificity)",
+    y     = "True Positive Rate (Sensitivity)",
+    title = "ROC Curves — Training CV vs External Validation\n(GSE120584 training | GSE46579 validation)"
+  ) +
+  theme_bw(base_size = 11) +
+  theme(legend.position = "bottom",
+        legend.text     = element_text(size = 8))
+
+print(p_roc)
+ggsave("results/Week5/roc_curves.png",
+       p_roc, width = 7, height = 6.5, dpi = 150)
+cat("ROC curve comparison plot saved to results/Week5/roc_curves.png\n")
+
 
 # ==============================================================================
-# SECTION 8: Calibration Plot
+# SECTION 9: Calibration Plot
 # ==============================================================================
 # RATIONALE:
 # AUC measures discrimination (can the model rank AD patients above Controls?)
@@ -900,166 +1400,155 @@ if (load_preds_success) {
 # The rms::val.prob() function provides additional calibration statistics (E50,
 # E90, Emax) if the rms package is available.
 
-cat("\n=== SECTION 8: Calibration Plot ===\n")
+cat("\n=== SECTION 9: Calibration Plot ===\n")
 
-if (load_preds_success) {
+# --------------------------------------------------------------------------
+# 9A. Manual calibration plot using probability binning
+# --------------------------------------------------------------------------
+# Divide predicted probabilities into quantile-based bins.
+# For each bin: mean predicted probability vs observed event rate.
 
-  # --------------------------------------------------------------------------
-  # 8A. Manual calibration plot using probability binning
-  # --------------------------------------------------------------------------
-  # Divide predicted probabilities into quantile-based bins.
-  # For each bin: mean predicted probability vs observed event rate.
+calibration_plot_data <- function(true_labels, pred_probs,
+                                  n_bins = 10, method = "quantile") {
+  # method = "quantile": equal-frequency bins (preferred for imbalanced data)
+  # method = "uniform": equal-width bins (0, 0.1, 0.2, ...)
 
-  calibration_plot_data <- function(true_labels, pred_probs,
-                                    n_bins = 10, method = "quantile") {
-    # method = "quantile": equal-frequency bins (preferred for imbalanced data)
-    # method = "uniform": equal-width bins (0, 0.1, 0.2, ...)
-
-    if (method == "quantile") {
-      breaks <- quantile(pred_probs, probs = seq(0, 1, length.out = n_bins + 1))
-      breaks <- unique(breaks)  # remove duplicates if distribution is peaked
-    } else {
-      breaks <- seq(0, 1, length.out = n_bins + 1)
-    }
-
-    bin_idx   <- cut(pred_probs, breaks = breaks, include.lowest = TRUE,
-                     labels = FALSE)
-    bin_df    <- data.frame(pred = pred_probs, true = true_labels, bin = bin_idx)
-
-    calib_df <- bin_df %>%
-      group_by(bin) %>%
-      summarise(
-        n           = n(),
-        mean_pred   = mean(pred),
-        observed_rate = mean(true),
-        se          = sqrt(observed_rate * (1 - observed_rate) / n),
-        .groups     = "drop"
-      ) %>%
-      filter(!is.na(bin))
-
-    return(calib_df)
+  if (method == "quantile") {
+    breaks <- quantile(pred_probs, probs = seq(0, 1, length.out = n_bins + 1))
+    breaks <- unique(breaks)  # remove duplicates if distribution is peaked
+  } else {
+    breaks <- seq(0, 1, length.out = n_bins + 1)
   }
 
-  calib_data <- calibration_plot_data(
-    true_labels = pred_val_ext$true_label,
-    pred_probs  = pred_val_ext$prob_AD,
-    n_bins      = 10,
-    method      = "quantile"
-  )
+  bin_idx  <- cut(pred_probs, breaks = breaks, include.lowest = TRUE,
+                   labels = FALSE)
+  bin_df   <- data.frame(pred = pred_probs, true = true_labels, bin = bin_idx)
 
-  # Plot
-  p_calib <- ggplot(calib_data, aes(x = mean_pred, y = observed_rate)) +
-    geom_abline(intercept = 0, slope = 1,
-                linetype = "dashed", colour = "grey40", linewidth = 0.8) +
-    geom_point(aes(size = n), colour = "#4575B4", alpha = 0.8) +
-    geom_errorbar(
-      aes(ymin = observed_rate - 1.96 * se,
-          ymax = observed_rate + 1.96 * se),
-      width = 0.02, colour = "#4575B4", alpha = 0.7
-    ) +
-    geom_smooth(method = "loess", se = TRUE, colour = "#D73027",
-                fill = "#D73027", alpha = 0.15, linewidth = 1) +
-    scale_size_continuous(name = "n (samples in bin)", range = c(2, 7)) +
-    scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
-    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
-    labs(
-      x       = "Mean Predicted Probability P(AD)",
-      y       = "Observed Event Rate (Fraction True AD)",
-      title   = "Calibration Plot — External Validation (GSE46579)",
-      caption = "Dashed line = perfect calibration. Error bars = 95% CI."
-    ) +
-    theme_bw(base_size = 12) +
-    theme(legend.position = "bottom")
+  calib_df <- bin_df %>%
+    group_by(bin) %>%
+    summarise(
+      n             = n(),
+      mean_pred     = mean(pred),
+      observed_rate = mean(true),
+      se            = sqrt(observed_rate * (1 - observed_rate) / n),
+      .groups       = "drop"
+    ) %>%
+    filter(!is.na(bin))
 
-  print(p_calib)
-  ggsave("results/calibration_plot_external.png", p_calib,
-         width = 6, height = 6, dpi = 150)
-  cat("Calibration plot saved to results/calibration_plot_external.png\n")
+  return(calib_df)
+}
 
-  # --------------------------------------------------------------------------
-  # 8B. Quantitative calibration metrics
-  # --------------------------------------------------------------------------
-  # Brier score: mean squared error of probability predictions
-  # Range: 0 (perfect) to 0.25 (uninformative — equivalent to always predicting 0.5)
-  # A "no-information" model predicting prevalence for all samples has Brier = prev*(1-prev)
+# Calibration for external validation (RF model)
+calib_rf  <- calibration_plot_data(y_val_binary, prob_val_rf,  n_bins = 10)
+calib_glm <- calibration_plot_data(y_val_binary, prob_val_glm, n_bins = 10)
 
-  brier_score <- mean((pred_val_ext$true_label - pred_val_ext$prob_AD)^2)
-  prevalence  <- mean(pred_val_ext$true_label)
-  brier_null  <- prevalence * (1 - prevalence)  # null model (always predict prevalence)
-  brier_scaled <- 1 - brier_score / brier_null   # scaled Brier (0 = null, 1 = perfect)
+calib_rf$model  <- "Random Forest"
+calib_glm$model <- "LASSO"
 
-  cat("\nCalibration Statistics (External Validation):\n")
-  cat("  Brier Score:        ", round(brier_score, 4),
-      " (lower is better; 0 = perfect)\n")
-  cat("  Brier Score (null): ", round(brier_null, 4), "\n")
-  cat("  Scaled Brier Score: ", round(brier_scaled, 4),
-      " (1 = perfect; 0 = null model; can be negative if worse than null)\n")
+calib_combined <- bind_rows(calib_rf, calib_glm)
 
-  # --------------------------------------------------------------------------
-  # 8C. Optional: rms::val.prob for detailed calibration statistics
-  # --------------------------------------------------------------------------
-  if (requireNamespace("rms", quietly = TRUE)) {
-    library(rms)
-    cat("\nrms package available — computing detailed calibration statistics.\n")
+p_calib <- ggplot(calib_combined,
+                  aes(x = mean_pred, y = observed_rate,
+                      colour = model, group = model)) +
+  geom_abline(intercept = 0, slope = 1,
+              linetype = "dashed", colour = "grey40", linewidth = 0.8) +
+  geom_errorbar(
+    aes(ymin = observed_rate - 1.96 * se,
+        ymax = observed_rate + 1.96 * se),
+    width = 0.02, alpha = 0.7
+  ) +
+  geom_point(aes(size = n), alpha = 0.85) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 0.9, alpha = 0.5) +
+  scale_colour_manual(values = c("Random Forest" = "#4575B4",
+                                 "LASSO"         = "#D73027"),
+                      name   = "Model") +
+  scale_size_continuous(name = "n (samples in bin)", range = c(2, 7)) +
+  scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, 0.2)) +
+  labs(
+    x       = "Mean Predicted Probability P(AD)",
+    y       = "Observed Event Rate (Fraction True AD)",
+    title   = "Calibration Plot — External Validation (GSE46579)",
+    caption = "Dashed line = perfect calibration. Error bars = 95% CI."
+  ) +
+  theme_bw(base_size = 12) +
+  theme(legend.position = "bottom")
+
+print(p_calib)
+ggsave("results/Week5/calibration_plot_external.png",
+       p_calib, width = 6.5, height = 6.5, dpi = 150)
+cat("Calibration plot saved to results/Week5/calibration_plot_external.png\n")
+
+# --------------------------------------------------------------------------
+# 9B. Quantitative calibration metrics (Brier score)
+# --------------------------------------------------------------------------
+# Brier score: mean squared error of probability predictions
+# Range: 0 (perfect) to 0.25 (uninformative — equivalent to always predicting 0.5)
+
+brier_rf  <- mean((y_val_binary - prob_val_rf)^2)
+brier_glm <- mean((y_val_binary - prob_val_glm)^2)
+prevalence <- mean(y_val_binary)
+brier_null <- prevalence * (1 - prevalence)   # null model (predict prevalence)
+
+cat("\nCalibration Statistics (External Validation):\n")
+cat(sprintf("  Random Forest Brier Score: %.4f (null: %.4f | scaled: %.4f)\n",
+            brier_rf,  brier_null, 1 - brier_rf  / brier_null))
+cat(sprintf("  LASSO       Brier Score: %.4f (null: %.4f | scaled: %.4f)\n",
+            brier_glm, brier_null, 1 - brier_glm / brier_null))
+cat("  (Scaled Brier: 1 = perfect; 0 = null model; negative = worse than null)\n")
+
+# --------------------------------------------------------------------------
+# 9C. Optional: rms::val.prob for detailed calibration statistics
+# --------------------------------------------------------------------------
+if (requireNamespace("rms", quietly = TRUE)) {
+  library(rms)
+  cat("\nrms package available — computing detailed calibration statistics (RF).\n")
+  tryCatch({
     cal_rms <- val.prob(
-      p      = pred_val_ext$prob_AD,
-      y      = pred_val_ext$true_label,
-      pl     = TRUE,           # produce calibration plot within rms
-      logistic.cal = TRUE,     # overlay logistic calibration line
-      main   = "val.prob Calibration (External Validation)"
+      p      = prob_val_rf,
+      y      = y_val_binary,
+      pl     = TRUE,
+      logistic.cal = TRUE,
+      main   = "val.prob Calibration — RF External Validation"
     )
     cat("Calibration statistics from rms::val.prob:\n")
     print(cal_rms)
-  } else {
-    cat("rms package not available. Install with install.packages('rms') for\n")
-    cat("additional calibration statistics (E50, E90, Emax, Hosmer-Lemeshow test).\n")
-  }
-
+  }, error = function(e) {
+    cat("rms::val.prob error:", conditionMessage(e), "\n")
+  })
 } else {
-  cat("Skipping calibration plot — prediction files not available.\n")
+  cat("rms package not available. Install with install.packages('rms') for\n")
+  cat("additional calibration statistics (E50, E90, Emax, Hosmer-Lemeshow test).\n")
 }
 
 
 # ==============================================================================
-# SECTION 9: Model Results Summary Table
+# SECTION 10: Model Results Summary Table
 # ==============================================================================
-# This section compiles a publication-ready summary of all ML model results.
-# The table includes: model name, training CV AUC ± 95%CI, external validation
-# AUC ± 95%CI, sensitivity, specificity, PPV, NPV at optimal threshold.
-#
-# We read all model prediction files from the results/ directory.
-# If multiple models were run in Python (XGBoost, Random Forest, Logistic
-# Regression), each should have its own predictions file.
+# Compile a publication-ready summary of all ML results.
+# Includes: model, training CV AUC ± CI, validation AUC ± CI,
+# sensitivity, specificity, PPV, NPV at Youden-optimal threshold.
 
-cat("\n=== SECTION 9: Model Results Summary Table ===\n")
+cat("\n=== SECTION 10: Model Results Summary Table ===\n")
 
-# Function to compute performance metrics from predictions
-compute_metrics <- function(true_labels, pred_probs, threshold = NULL) {
+# Function to compute performance metrics from ROC object + predictions
+compute_metrics <- function(roc_obj, pred_probs, true_labels) {
 
-  # AUC with bootstrap CI
-  roc_obj  <- roc(true_labels, pred_probs, direction = "<", quiet = TRUE)
   auc_val  <- as.numeric(auc(roc_obj))
   ci_boot  <- tryCatch(
     as.numeric(ci.auc(roc_obj, method = "bootstrap", boot.n = 1000)),
     error = function(e) c(NA, auc_val, NA)
   )
 
-  # Optimal threshold by Youden index if not specified
-  if (is.null(threshold)) {
-    coords_df <- coords(roc_obj, "best", best.method = "youden",
-                        ret = c("threshold", "sensitivity", "specificity"))
-    threshold <- coords_df$threshold[1]
-    sens      <- coords_df$sensitivity[1]
-    spec      <- coords_df$specificity[1]
-  } else {
-    pred_class <- as.integer(pred_probs >= threshold)
-    TP <- sum(pred_class == 1 & true_labels == 1)
-    TN <- sum(pred_class == 0 & true_labels == 0)
-    FP <- sum(pred_class == 1 & true_labels == 0)
-    FN <- sum(pred_class == 0 & true_labels == 1)
-    sens <- TP / (TP + FN)
-    spec <- TN / (TN + FP)
-  }
+  # Optimal threshold by Youden index
+  coords_df <- tryCatch(
+    coords(roc_obj, "best", best.method = "youden",
+           ret = c("threshold", "sensitivity", "specificity")),
+    error = function(e) data.frame(threshold = 0.5, sensitivity = NA, specificity = NA)
+  )
+  threshold <- coords_df$threshold[1]
+  sens      <- coords_df$sensitivity[1]
+  spec      <- coords_df$specificity[1]
 
   # PPV and NPV at the threshold
   pred_class <- as.integer(pred_probs >= threshold)
@@ -1084,118 +1573,77 @@ compute_metrics <- function(true_labels, pred_probs, threshold = NULL) {
   ))
 }
 
-# --------------------------------------------------------------------------
-# 9A. Compile results for all available models
-# --------------------------------------------------------------------------
-# List of models to include in the summary table.
-# File naming convention: results/{model_name}_{cohort}_predictions.csv
-# Each file has columns: true_label, prob_AD
+set.seed(42)
+m_cv_rf  <- compute_metrics(roc_cv_rf,  cv_preds_rf$prob_AD,  cv_preds_rf$true_binary)
+m_val_rf <- compute_metrics(roc_val_rf, prob_val_rf,          y_val_binary)
+m_cv_glm  <- compute_metrics(roc_cv_glm,  cv_preds_glm$prob_AD, cv_preds_glm$true_binary)
+m_val_glm <- compute_metrics(roc_val_glm, prob_val_glm,         y_val_binary)
 
-model_names       <- c("XGBoost", "RandomForest", "LogisticRegression")
-results_rows      <- list()
+results_table <- data.frame(
+  Model              = c("RandomForest", "LASSO"),
+  Training_CV_AUC    = c(m_cv_rf$auc_str,  m_cv_glm$auc_str),
+  Validation_AUC     = c(m_val_rf$auc_str, m_val_glm$auc_str),
+  AUC_Gap            = c(round(m_cv_rf$auc - m_val_rf$auc, 4),
+                         round(m_cv_glm$auc - m_val_glm$auc, 4)),
+  Optimal_Threshold  = c(m_cv_rf$threshold,  m_cv_glm$threshold),
+  Sensitivity_Val    = c(m_val_rf$sens,  m_val_glm$sens),
+  Specificity_Val    = c(m_val_rf$spec,  m_val_glm$spec),
+  PPV_Val            = c(m_val_rf$ppv,   m_val_glm$ppv),
+  NPV_Val            = c(m_val_rf$npv,   m_val_glm$npv),
+  stringsAsFactors   = FALSE
+)
 
-for (model in model_names) {
+cat("\n=== COMPLETE MODEL RESULTS SUMMARY ===\n")
+print(results_table)
 
-  train_file <- file.path("results",
-                           paste0(tolower(gsub(" ", "", model)),
-                                  "_training_cv_predictions.csv"))
-  val_file   <- file.path("results",
-                           paste0(tolower(gsub(" ", "", model)),
-                                  "_validation_predictions.csv"))
+write.csv(results_table,
+          "results/Week5/model_performance_summary.csv",
+          row.names = FALSE)
+cat("\nSummary table saved to results/Week5/model_performance_summary.csv\n")
 
-  # Check for generic filenames if model-specific not found
-  if (!file.exists(train_file)) {
-    train_file <- "results/training_cv_predictions.csv"
-  }
-  if (!file.exists(val_file)) {
-    val_file <- "results/validation_predictions.csv"
-  }
-
-  if (file.exists(train_file) && file.exists(val_file)) {
-
-    pred_tr <- read.csv(train_file)
-    pred_va <- read.csv(val_file)
-
-    metrics_tr <- compute_metrics(pred_tr$true_label, pred_tr$prob_AD)
-    metrics_va <- compute_metrics(pred_va$true_label, pred_va$prob_AD)
-
-    results_rows[[model]] <- data.frame(
-      Model              = model,
-      Training_CV_AUC    = metrics_tr$auc_str,
-      Validation_AUC     = metrics_va$auc_str,
-      AUC_Gap            = round(metrics_tr$auc - metrics_va$auc, 4),
-      Optimal_Threshold  = metrics_tr$threshold,  # threshold from training CV
-      Sensitivity        = metrics_va$sens,
-      Specificity        = metrics_va$spec,
-      PPV                = metrics_va$ppv,
-      NPV                = metrics_va$npv,
-      stringsAsFactors   = FALSE
-    )
-
-    cat(sprintf("%-20s: Training AUC = %s | Validation AUC = %s | Gap = %.4f\n",
-                model, metrics_tr$auc_str, metrics_va$auc_str,
-                metrics_tr$auc - metrics_va$auc))
-
-  } else {
-    cat(sprintf("%-20s: Prediction files not found — skipping.\n", model))
-  }
+# Print formatted table if knitr is available
+if (requireNamespace("knitr", quietly = TRUE)) {
+  cat("\nFormatted table (knitr):\n")
+  print(knitr::kable(results_table, format = "simple", align = "c"))
 }
 
-if (length(results_rows) > 0) {
-  results_table <- do.call(rbind, results_rows)
-  rownames(results_table) <- NULL
-
-  cat("\n=== COMPLETE MODEL RESULTS SUMMARY ===\n")
-  print(results_table)
-
-  # Save as CSV
-  write.csv(results_table,
-            "results/model_results_summary.csv",
-            row.names = FALSE)
-  cat("\nSummary table saved to results/model_results_summary.csv\n")
-
-  # Print formatted table (use knitr::kable if available for nicer output)
-  if (requireNamespace("knitr", quietly = TRUE)) {
-    cat("\nFormatted table (knitr):\n")
-    print(knitr::kable(results_table, format = "simple", align = "c"))
-  }
-
-} else {
-  cat("No prediction files found. Complete Lab 5B (Python) and then re-run.\n")
-  cat("Once Python saves predictions to results/, this section will populate.\n")
-
-  # Create a template table for documentation purposes
-  template_table <- data.frame(
-    Model             = c("XGBoost", "RandomForest", "LogisticRegression"),
-    Training_CV_AUC   = c("[run Lab 5B]", "[run Lab 5B]", "[run Lab 5B]"),
-    Validation_AUC    = c("[run Lab 5B]", "[run Lab 5B]", "[run Lab 5B]"),
-    AUC_Gap           = c(NA, NA, NA),
-    Sensitivity       = c(NA, NA, NA),
-    Specificity       = c(NA, NA, NA),
-    stringsAsFactors  = FALSE
-  )
-
-  write.csv(template_table,
-            "results/model_results_summary_TEMPLATE.csv",
-            row.names = FALSE)
-  cat("Template table written to results/model_results_summary_TEMPLATE.csv\n")
+# AUC gap interpretation
+cat("\nAUC gap interpretation:\n")
+for (i in seq_len(nrow(results_table))) {
+  gap <- results_table$AUC_Gap[i]
+  interp <- if (gap < 0.05) "Excellent generalizability"
+             else if (gap < 0.10) "Acceptable — some platform effects"
+             else if (gap < 0.20) "Moderate degradation — investigate top features"
+             else "Severe degradation — model may have overfit"
+  cat(sprintf("  %-15s AUC gap = %.4f : %s\n",
+              results_table$Model[i], gap, interp))
 }
 
 
 # ==============================================================================
-# SECTION 10: Save Harmonized Data Objects
+# SECTION 11: Save Harmonized Data Objects
 # ==============================================================================
-# Save all harmonized data objects as .rds files for use in downstream analyses
+# Save all harmonized data objects as .rds files for downstream analyses
 # and reproducibility. These are the "clean, harmonized" versions that include
 # only the intersection features, z-scored, and with v22 miRNA names.
+#
+# Week 6 reads:
+#   data/processed/harmonized_expr.rds         — training expression matrix
+#   data/processed/metadata_harmonized.rds     — training metadata
 
-cat("\n=== SECTION 10: Save Harmonized Data Objects ===\n")
+cat("\n=== SECTION 11: Save Harmonized Data Objects ===\n")
 
 # Main harmonized expression matrices (z-scored, intersection features only)
 saveRDS(expr_120584_z,
         "data/processed/GSE120584_expr_harmonized_zscore.rds")
 saveRDS(expr_46579_z,
         "data/processed/GSE46579_expr_harmonized_zscore.rds")
+
+# Canonical file names expected by Week6_Interpretation.R
+saveRDS(expr_120584_z,
+        "data/processed/harmonized_expr.rds")
+saveRDS(metadata_120584,
+        "data/processed/metadata_harmonized.rds")
 
 # Name mapping tables (useful for tracing back to original names)
 saveRDS(conversion_120584,
@@ -1205,8 +1653,8 @@ saveRDS(conversion_46579,
 
 # Intersection feature list (with both MIMAT accessions and v22 names)
 intersection_info <- data.frame(
-  MIMAT_accession = common_features,
-  v22_name        = rownames(expr_120584_z),  # after back-conversion in Section 4C
+  MIMAT_accession      = common_features,
+  v22_name             = rownames(expr_120584_z),  # after back-conversion in Section 4C
   present_in_GSE120584 = TRUE,
   present_in_GSE46579  = TRUE
 )
@@ -1218,6 +1666,8 @@ saveRDS(intersection_info,
         "data/processed/feature_intersection.rds")
 
 cat("Harmonized data objects saved:\n")
+cat("  data/processed/harmonized_expr.rds                (training expr, z-scored)\n")
+cat("  data/processed/metadata_harmonized.rds            (training metadata)\n")
 cat("  data/processed/GSE120584_expr_harmonized_zscore.rds\n")
 cat("  data/processed/GSE46579_expr_harmonized_zscore.rds\n")
 cat("  data/processed/GSE120584_mirbase_conversion.rds\n")
@@ -1226,7 +1676,7 @@ cat("  data/processed/feature_intersection.csv\n")
 
 
 # ==============================================================================
-# SECTION 11: Session Summary
+# SECTION 12: Session Summary
 # ==============================================================================
 # Print a complete summary of what was accomplished, key numbers, and file outputs.
 # Save session information for reproducibility.
@@ -1260,43 +1710,54 @@ cat("  Pct of GSE46579 retained:             ",
 
 cat("\nZ-score standardization: applied independently per dataset.\n")
 
+cat("\n--- ML Model Summary ---\n")
+cat("Binary classifier: AD vs Control (GSE120584 training)\n")
+cat(sprintf("  Random Forest (best mtry=%d):\n", model_rf$bestTune$mtry))
+cat(sprintf("    Training CV AUC: %s\n", m_cv_rf$auc_str))
+cat(sprintf("    Validation AUC:  %s\n", m_val_rf$auc_str))
+cat(sprintf("  LASSO (best lambda=%.5f):\n", model_glm$bestTune$lambda))
+cat(sprintf("    Training CV AUC: %s\n", m_cv_glm$auc_str))
+cat(sprintf("    Validation AUC:  %s\n", m_val_glm$auc_str))
+
+cat("\nTop 5 miRNAs by SHAP importance (Random Forest):\n")
+print(head(shap_importance[, c("miRNA", "mean_abs_shap")], 5))
+
 cat("\n--- Files Written This Session ---\n")
 cat("data/processed/:\n")
-cat("  GSE120584_harmonized.csv              (samples × features, z-scored)\n")
-cat("  GSE120584_metadata_harmonized.csv     (sample IDs + group labels)\n")
-cat("  GSE46579_harmonized.csv               (samples × features, z-scored)\n")
-cat("  GSE46579_metadata_harmonized.csv      (sample IDs + group labels)\n")
-cat("  GSE120584_expr_harmonized_zscore.rds  (R matrix object)\n")
-cat("  GSE46579_expr_harmonized_zscore.rds   (R matrix object)\n")
-cat("  feature_intersection.csv              (shared miRNAs with MIMAT and v22 names)\n")
+cat("  harmonized_expr.rds                   (training expr — read by Week 6)\n")
+cat("  metadata_harmonized.rds               (training metadata — read by Week 6)\n")
+cat("  GSE120584_expr_harmonized_zscore.rds\n")
+cat("  GSE46579_expr_harmonized_zscore.rds\n")
+cat("  feature_intersection.csv\n")
+cat("results/Week5/:\n")
+cat("  shap_feature_importance.csv           (miRNA, mean_abs_shap — read by Week 6)\n")
+cat("  cv_predictions_rf.csv\n")
+cat("  cv_predictions_glm.csv\n")
+cat("  external_validation_predictions.csv\n")
+cat("  model_performance_summary.csv\n")
+cat("  roc_curves.png\n")
+cat("  calibration_plot_external.png\n")
+cat("  shap_beeswarm.png\n")
 cat("qc_reports/:\n")
-cat("  pca_before_after_zscore.png           (QC plot)\n")
-
-if (load_preds_success) {
-  cat("results/:\n")
-  cat("  roc_comparison_training_vs_validation.png\n")
-  cat("  calibration_plot_external.png\n")
-  cat("  model_results_summary.csv\n")
-}
-
-cat("\n--- Next Steps ---\n")
-cat("1. Open Week5_AdvancedML_Validation.md for the full Lab 5B Python instructions.\n")
-cat("2. In Python, load data/processed/GSE120584_harmonized.csv (training).\n")
-cat("3. Run nested CV (Section 5.2.4) and XGBoost (Section 5.3).\n")
-cat("4. Compute SHAP values (Section 5.4) — beeswarm and force plots.\n")
-cat("5. Apply trained model to GSE46579_harmonized.csv (external validation).\n")
-cat("6. Save prediction files to results/ and re-run Sections 7–9 of this script.\n")
-cat("7. Interpret the AUC gap and biological plausibility of top miRNAs.\n")
+cat("  pca_before_after_zscore.png\n")
 
 cat("\n--- Key Interpretation Reminders ---\n")
 cat("AUC gap interpretation:\n")
-cat("  < 0.05:  Excellent generalizability\n")
+cat("  < 0.05:    Excellent generalizability\n")
 cat("  0.05-0.10: Acceptable; some platform effects\n")
 cat("  0.10-0.20: Moderate degradation; investigate top features\n")
-cat("  > 0.20:  Severe degradation; model may have overfit\n\n")
+cat("  > 0.20:    Severe degradation; model may have overfit\n\n")
 cat("If AUC gap is large: examine which top SHAP features are absent from the\n")
 cat("  intersection. If key features are missing from GSE46579, the model could\n")
 cat("  not express their full predictive capacity in validation.\n")
+
+cat("\n--- Next Steps ---\n")
+cat("1. Proceed to Week6_Interpretation.R for:\n")
+cat("   - Integration of SHAP + DE results into composite miRNA ranking\n")
+cat("   - multiMiR target database queries\n")
+cat("   - KEGG/GO pathway enrichment (clusterProfiler)\n")
+cat("   - STRINGdb protein-protein interaction network\n")
+cat("2. For further methodological details, see Week5_AdvancedML_Validation.md.\n")
 
 # Save session info for reproducibility
 session_file <- "qc_reports/session_info_week5.txt"
@@ -1309,5 +1770,4 @@ cat("\nSession info saved to", session_file, "\n")
 
 cat("\n================================================================================\n")
 cat("  Week 5 R Script Complete!\n")
-cat("  Now proceed to Lab 5B (Python) to complete the ML analysis.\n")
 cat("================================================================================\n")

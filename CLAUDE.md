@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Repository Is
 
-A 6-week graduate course curriculum on AI/ML-based biomarker discovery using miRNA expression data in Alzheimer's disease. Audience: wet-lab biologists with little prior coding experience. Each week has a lecture write-up (`.md`) and a standalone lab R script (`.R`). Week 4 also has a Python component (Jupyter notebook).
+A 6-week graduate course curriculum on AI/ML-based biomarker discovery using miRNA expression data in Alzheimer's disease. Audience: wet-lab biologists with little prior coding experience. Each week has a lecture write-up (`.md`) and a standalone lab R script (`.R`). All computation is in R only.
 
 ## Running the Scripts
 
@@ -24,18 +24,11 @@ setwd("/path/to/ML-based-biomarker-discovery")
 # Each script reads from data/processed/ and writes to results/
 ```
 
-**Python component (Lab 4B):**
-```bash
-# Requires: numpy, pandas, scikit-learn, matplotlib, seaborn, umap-learn
-pip install scikit-learn umap-learn shap xgboost matplotlib seaborn
-# Open Week4_ML_Classifier.ipynb in JupyterLab
-```
-
 ## Required R Version and Packages
 
 - R ≥ 4.3.0, Bioconductor ≥ 3.18
-- **Bioconductor:** GEOquery, DESeq2, limma, edgeR, multiMiR, miRBaseConverter, clusterProfiler, org.Hs.eg.db, affy, oligo, sva, STRINGdb, igraph
-- **CRAN:** ggplot2, tidyverse, pheatmap, reshape2, RColorBrewer, ggrepel, gridExtra, cluster, factoextra, car, MASS, pROC, knitr, rmarkdown
+- **Bioconductor:** GEOquery, DESeq2, limma, edgeR, multiMiR, miRBaseConverter, clusterProfiler, org.Hs.eg.db, affy, oligo, sva
+- **CRAN:** ggplot2, tidyverse, pheatmap, reshape2, RColorBrewer, ggrepel, gridExtra, cluster, factoextra, car, MASS, pROC, caret, randomForest, glmnet, fastshap, knitr, rmarkdown
 
 Install everything via `Week1_Setup_Template.R` Section 3.
 
@@ -62,22 +55,22 @@ Each script consumes outputs from the previous week. The critical files passed b
 | `data/processed/GSE120584_counts_filtered.rds` | Week 2 | Week 4 |
 | `data/processed/GSE46579_expr_rma.rds` | Week 2 | Weeks 4–5 |
 | `data/processed/GSE120584_expr_varianceFiltered.rds` | Week 3 | Weeks 4–5 |
-| `data/processed/GSE120584_expr_vf.csv` | Week 3 | Lab 3B (Python) |
-| `data/processed/GSE120584_expr_forML.csv` | Week 4 | Lab 4B (Python) |
 | `results/consensus_features_Week4.csv` | Week 4 | Week 5 |
-| Harmonized RDS objects | Week 5 | Week 6 |
+| `data/processed/harmonized_expr.rds` | Week 5 | Week 6 |
+| `data/processed/metadata_harmonized.rds` | Week 5 | Week 6 |
+| `results/Week5/shap_feature_importance.csv` | Week 5 | Week 6 |
 
 ## Script Architecture
 
 **`Week2_DataAcquisition_QC.R`** — Downloads GSE120584 (RNA-seq) and GSE46579 (microarray) from GEO, runs full QC pipelines, normalises (DESeq2 VST / RMA), detects hemolysis and batch effects (ComBat), saves clean matrices.
 
-**`Week3_EDA.R`** — Loads Week 2 outputs; computes per-miRNA statistics; runs PCA (prcomp), hierarchical clustering (Ward.D2), gap statistic, silhouette, k-means, pheatmap; quantifies confounder effects via partial R²; exports variance-filtered CSV for Python t-SNE/UMAP.
+**`Week3_EDA.R`** — Loads Week 2 outputs; computes per-miRNA statistics; runs PCA (prcomp), hierarchical clustering (Ward.D2), gap statistic, silhouette, k-means, pheatmap; quantifies confounder effects via partial R².
 
-**`Week4_DE_FeatureSelection.R`** — Runs DESeq2 on GSE120584 (three comparisons: AD vs Control, MCI vs Control, AD vs MCI) with lfcShrink; runs limma on GSE46579; computes cross-dataset overlap; applies Mann-Whitney U filter; exports `expr_forML.csv` for Python Lab 4B.
+**`Week4_DE_FeatureSelection.R`** — Runs DESeq2 on GSE120584 (three comparisons: AD vs Control, MCI vs Control, AD vs MCI) with lfcShrink; runs limma on GSE46579; computes cross-dataset overlap; applies Mann-Whitney U filter; exports consensus feature table.
 
-**`Week5_Validation.R`** — Harmonizes miRNA names across miRBase versions (miRBaseConverter/MIMAT accessions), finds feature intersection between platforms, applies z-score standardisation, exports harmonized matrices for Python, runs DeLong AUC test (pROC), generates calibration plots.
+**`Week5_Validation.R`** — Harmonizes miRNA names across miRBase versions (miRBaseConverter/MIMAT accessions), finds feature intersection between platforms, applies z-score standardisation, trains Random Forest and LASSO (glmnet) via caret nested CV, computes SHAP values (fastshap), runs DeLong AUC test (pROC), generates calibration plots. All ML is in R — no Python.
 
-**`Week6_Interpretation.R`** — Integrates SHAP + DE results into composite ranking, queries multiMiR (14 databases), runs KEGG/GO enrichment (clusterProfiler), builds STRINGdb PPI network, generates the paper-style forest plot, simulates qPCR ΔΔCt validation.
+**`Week6_Interpretation.R`** — Integrates SHAP + DE results into composite ranking, queries multiMiR (14 databases), runs KEGG/GO enrichment (clusterProfiler), generates the paper-style forest plot.
 
 ## Key Coding Conventions
 
