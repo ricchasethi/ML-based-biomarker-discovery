@@ -13,6 +13,9 @@ This course teaches wet-lab biologists how to apply AI/ML techniques to discover
 **Datasets:** GSE120584 (serum RNA-seq, 148 samples) and GSE46579 (whole blood microarray)  
 **Languages:** R (Bioconductor) for data processing and statistics; Python (scikit-learn) for machine learning  
 
+All course materials, lecture write-ups, and R lab templates are available on GitHub:  
+**https://github.com/ricchasethi/ML-based-biomarker-discovery/tree/main**
+
 ---
 
 ## System Requirements
