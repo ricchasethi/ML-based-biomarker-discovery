@@ -171,9 +171,9 @@ Open Settings (`Ctrl+,`), search for each setting below, and apply it:
 
 ---
 
-## Part 3 — Setting Up Python (for Labs 3B, 4B, and 5B)
+## Part 3 — Setting Up Python (for Lab 4B)
 
-Python is used for t-SNE/UMAP visualisation (Week 3) and all machine learning classifiers (Weeks 4–5). The recommended approach is Anaconda with a dedicated course environment.
+Python is used for the machine learning classifiers in Week 4. The recommended approach is Anaconda with a dedicated course environment.
 
 ### Step 1: Install Anaconda
 
@@ -303,37 +303,27 @@ ML-based-biomarker-discovery/
 ### Week 3 — Exploratory Data Analysis
 
 **Lecture write-up:** `Week3_EDA.md`  
-**Lab script (R):** `Week3_EDA.R`  
-**Lab 3B (Python):** Uses `GSE120584_expr_vf.csv` exported by `Week3_EDA.R`
+**Lab script (R):** `Week3_EDA.R`
 
 **What you will learn:**
 - Per-miRNA statistics: coefficient of variation, IQR, zero inflation
 - PCA: covariance matrix intuition, scree plots, PC1/PC2 scatter, biplot, loadings table
-- Why t-SNE cluster sizes and distances are not interpretable; perplexity sensitivity analysis
-- UMAP vs t-SNE: when to use each; global structure preservation
 - Hierarchical clustering with Ward.D2 linkage; reading a dendrogram
 - Gap statistic and silhouette width for optimal cluster number selection
 - Cluster purity: quantifying how well unsupervised clusters recover clinical labels
 - Quantifying confounder effects via partial R² (age and sex vs principal components)
 - Mahalanobis distance for outlier detection
 
-**Lab 3A tasks (RStudio, `Week3_EDA.R`):**
+**Lab tasks (RStudio, `Week3_EDA.R`):**
 1. Sections 1–4: Load data, compute stats, plot zero inflation and density
-2. Section 5: Apply IQR variance filter; export CSV for Python
+2. Section 5: Apply IQR variance filter; save variance-filtered RDS
 3. Section 6: Run PCA; generate scree plot, PC1/PC2 scatter, biplot, loadings table
 4. Sections 7–10: Hierarchical clustering, gap statistic, silhouette, k-means
 5. Section 11: pheatmap with Group/Sex/Age annotation tracks
 6. Sections 12–13: Confounder partial R² and Mahalanobis outlier detection
 
-**Lab 3B tasks (JupyterLab, Python):**
-1. Load `data/processed/GSE120584_expr_vf.csv`
-2. Run t-SNE at perplexity = 10, 30, 50 and compare cluster stability
-3. Run UMAP at n_neighbors = 5, 15, 30; colour by Group, Age, Sex
-4. Produce a 4-panel figure for the written deliverable
-
 **Key output files produced:**
 - `data/processed/GSE120584_expr_varianceFiltered.rds` — input for Week 4 R script
-- `data/processed/GSE120584_expr_vf.csv` — input for Python Labs 3B and 4B
 - `results/pca_pc1_loadings.csv`, `results/heatmap_top50_miRNAs.png`, and others
 
 ---
@@ -467,7 +457,7 @@ Confirm your `biomarker_ml` conda environment is activated before launching Jupy
 ```
 Week 1: Week1_Setup_Template.R          ← one-time package installation
 Week 2: Week2_DataAcquisition_QC.R      ← downloads data; run with internet access
-Week 3: Week3_EDA.R                     ← then open Python for Lab 3B
+Week 3: Week3_EDA.R                     ← complete EDA in R
 Week 4: Week4_DE_FeatureSelection.R     ← then open Week4_ML_Classifier.ipynb
 Week 5: Week5_Validation.R              ← complete ML pipeline in R
 Week 6: Week6_Interpretation.R          ← final week; reads all prior outputs
