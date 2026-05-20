@@ -28,9 +28,6 @@
 #   zero_inflation_histogram.png
 #   density_plot_representative.png
 #
-# Also exported for Python (t-SNE / UMAP in Lab 3B):
-#   data/processed/GSE120584_expr_vf.csv        — variance-filtered expr (CSV)
-#   data/processed/GSE120584_metadata_clean.csv — metadata (CSV)
 #   data/processed/GSE120584_expr_varianceFiltered.rds
 #
 # =============================================================================
@@ -216,20 +213,10 @@ expr_vf       <- expr[iqr_per_mirna >= iqr_threshold, ]
 cat("Original matrix:", nrow(expr), "miRNAs\n")
 cat("After variance filtering (IQR ≥ 25th percentile):", nrow(expr_vf), "miRNAs\n\n")
 
-# Save variance-filtered matrix as both RDS (for R) and CSV (for Python)
 saveRDS(expr_vf, "data/processed/GSE120584_expr_varianceFiltered.rds")
-write.csv(expr_vf,
-          "data/processed/GSE120584_expr_vf.csv",
-          row.names = TRUE)
-write.csv(as.data.frame(t(meta)),
-          "data/processed/GSE120584_metadata_clean.csv",
-          row.names = TRUE)
 
 cat("Variance-filtered matrix saved:\n")
 cat("  RDS: data/processed/GSE120584_expr_varianceFiltered.rds\n")
-cat("  CSV: data/processed/GSE120584_expr_vf.csv\n")
-cat("Metadata CSV: data/processed/GSE120584_metadata_clean.csv\n")
-cat("  (Python t-SNE/UMAP scripts in Lab 3B read these CSVs)\n")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 6 — Principal Component Analysis (PCA)
@@ -869,14 +856,8 @@ cat("  dendrogram_ward_k3.png\n  gap_statistic.png\n  silhouette_width.png\n")
 cat("  heatmap_top50_miRNAs.png\n  kmeans_pca_overlay.png\n")
 cat("  cluster_purity_table.csv\n  pc_confounder_correlations.csv\n\n")
 
-cat("Files exported for Python (Lab 3B — t-SNE / UMAP):\n")
-cat("  data/processed/GSE120584_expr_vf.csv\n")
-cat("  data/processed/GSE120584_metadata_clean.csv\n")
-cat("  data/processed/GSE120584_expr_varianceFiltered.rds\n\n")
-
 cat("─────────────────────────────────────────────────────\n")
 cat("PROCEED TO:\n")
-cat("  Lab 3B — Open Week3_Lab3B_tSNE_UMAP.ipynb in JupyterLab\n")
 cat("  Week 4  — Open Week4_DE_FeatureSelection.R in RStudio\n")
 cat("─────────────────────────────────────────────────────\n\n")
 

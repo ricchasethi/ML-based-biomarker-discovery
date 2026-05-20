@@ -8,10 +8,9 @@
 By the end of Week 3, you will be able to:
 1. Compute and interpret descriptive statistics for miRNA expression data, including coefficient of variation, sparsity, and zero-inflation, and explain what these statistics reveal about data quality and biological signal
 2. Perform Principal Component Analysis on a miRNA expression matrix, interpret scree plots and loadings, and explain in biological terms what each principal component captures
-3. Generate and critically interpret t-SNE and UMAP dimensionality reduction plots, selecting appropriate hyperparameters and recognizing common interpretation pitfalls specific to nonlinear methods
-4. Execute hierarchical and k-means clustering, evaluate optimal cluster number using gap statistic and silhouette width, and compute cluster purity against known disease groups
-5. Produce and read a publication-quality annotated heatmap of miRNA expression, interpreting row and column structure in terms of disease biology
-6. Identify and quantify the contribution of biological confounders (age, sex) to principal components using correlation tests and partial R², and describe a strategy to account for these in downstream ML modeling
+3. Execute hierarchical and k-means clustering, evaluate optimal cluster number using gap statistic and silhouette width, and compute cluster purity against known disease groups
+4. Produce and read a publication-quality annotated heatmap of miRNA expression, interpreting row and column structure in terms of disease biology
+5. Identify and quantify the contribution of biological confounders (age, sex) to principal components using correlation tests and partial R², and describe a strategy to account for these in downstream ML modeling
 
 ---
 
@@ -29,7 +28,7 @@ When a clinician sees a new patient for the first time, they do not immediately 
 
 **4. Generating preliminary biological hypotheses.** A miRNA that appears in the top cluster-defining rows of a heatmap, and whose cluster separates AD from control perfectly, is a candidate worth investigating mechanistically — even before the formal differential expression analysis.
 
-> **The biology-first principle applies here more than anywhere else in the course.** Every plot you generate this week should prompt a biological question. A t-SNE cluster is not just a visual grouping; it represents a set of patients whose miRNA profiles are similar — and asking *why* they are similar is the beginning of a discovery.
+> **The biology-first principle applies here more than anywhere else in the course.** Every plot you generate this week should prompt a biological question. A cluster in a heatmap or PCA plot is not just a visual grouping; it represents a set of patients whose miRNA profiles are similar — and asking *why* they are similar is the beginning of a discovery.
 
 ---
 
@@ -315,7 +314,7 @@ ggsave("results/pca_pc1_pc2_group.png", p_pc12, width = 8, height = 6, dpi = 150
 **What to look for in this plot:**
 - AD samples shifted to one end of PC1 and control samples at the other → PC1 represents a disease axis — excellent
 - MCI samples positioned between AD and control → the miRNA signature tracks disease progression — biologically compelling
-- Groups completely overlapping → no linear separation; harder ML task, consider nonlinear methods (t-SNE/UMAP in Module 3.3)
+- Groups completely overlapping → no linear separation; harder ML task, may benefit from nonlinear classifiers
 - Outlier points far from their group's cluster → possible sample swaps, extreme cases, or misdiagnosed samples
 
 ---
@@ -430,255 +429,6 @@ ggsave("results/pca_pc34_sex_check.png",
        arrangeGrob(p_pc34, p_pc12_sex, ncol = 2),
        width = 14, height = 6, dpi = 150)
 ```
-
----
-
-## MODULE 3.3 — t-SNE and UMAP: Nonlinear Dimensionality Reduction
-
-### 3.3.1 Why PCA Is Not Enough
-
-PCA is a **linear** method. It finds the best linear combinations of miRNAs to capture variance. But biological data is often organized in **nonlinear manifolds** — the shape of the data in high-dimensional space is curved, not flat.
-
-Imagine you have three groups of patients (AD, MCI, Control) whose miRNA profiles differ from each other, but the differences are a combination of continuous disease severity and discrete biological sub-types. In high-dimensional space, the data might sit on a curved surface where PCA's flat planes capture the gross structure but miss the subtle local neighborhood relationships.
-
-**t-SNE (t-Distributed Stochastic Neighbor Embedding)** and **UMAP (Uniform Manifold Approximation and Projection)** are nonlinear methods that preserve **local neighborhood structure** — samples that are similar to each other in high-dimensional space are placed near each other in 2D. This often reveals cluster structures that PCA cannot show.
-
----
-
-### 3.3.2 t-SNE: How It Works (Conceptual Explanation)
-
-t-SNE was introduced by van der Maaten and Hinton in 2008. It works in two steps:
-
-**Step 1 (high-dimensional space):** For each sample, compute probabilities that reflect how similar it is to every other sample. Samples that are close together in high-dimensional expression space have high probability of being "neighbors."
-
-**Step 2 (low-dimensional space):** Place all samples in a random 2D arrangement, then iteratively adjust their positions so that the neighborhood probabilities in 2D match those in the original high-dimensional space as closely as possible. Samples that were neighbors in 300D should end up near each other in 2D.
-
-The result: samples from the same type (e.g., all AD samples with similar miRNA profiles) clump together into visible clusters in 2D, even if PCA failed to separate them clearly.
-
-**The perplexity parameter** controls the effective number of neighbors considered for each sample. Think of it as a scale parameter: low perplexity (5–10) focuses on very local structure (tight, small clusters); high perplexity (50–100) captures broader structure. For most biological datasets with 100–500 samples, perplexity = 30 is a reasonable starting point.
-
----
-
-### 3.3.3 t-SNE in Python
-
-t-SNE is computationally expensive; for datasets above a few thousand samples, use Barnes-Hut t-SNE or UMAP instead. For our dataset (148 samples), standard t-SNE runs in seconds.
-
-```python
-# ============================================================
-# t-SNE in Python using scikit-learn
-# ============================================================
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.patches as mpatches
-from sklearn.manifold import TSNE
-from sklearn.preprocessing import StandardScaler
-
-# Load data (exported from R as CSV in Week 3 R script, Section 9)
-expr   = pd.read_csv("data/processed/GSE120584_expr_vf.csv", index_col=0)
-meta   = pd.read_csv("data/processed/GSE120584_metadata_clean.csv", index_col=0)
-
-# Transpose so samples are rows
-X = expr.T.values     # shape: (n_samples, n_features)
-
-# Standardize: mean 0, unit variance per feature
-# VST already stabilises variance, but StandardScaler ensures equal weight
-scaler = StandardScaler()
-X_scaled = scaler.fit_transform(X)
-
-# ---- t-SNE with default perplexity ----
-tsne = TSNE(
-    n_components   = 2,
-    perplexity     = 30,       # key hyperparameter (try 15, 30, 50)
-    learning_rate  = "auto",   # recommended in sklearn >= 1.2
-    n_iter         = 1000,
-    random_state   = 42,       # set seed for reproducibility
-    init           = "pca"     # initialise from PCA (more stable than random)
-)
-X_tsne = tsne.fit_transform(X_scaled)
-
-# Build results dataframe
-tsne_df = pd.DataFrame({
-    "tSNE1"  : X_tsne[:, 0],
-    "tSNE2"  : X_tsne[:, 1],
-    "Group"  : meta["group"].values
-}, index=meta.index)
-
-# Plot
-GROUP_COLORS = {
-    "Control"                   : "#4575B4",
-    "Mild Cognitive Impairment" : "#FEE090",
-    "Alzheimer's Disease"       : "#D73027"
-}
-
-fig, ax = plt.subplots(figsize=(8, 6))
-for group, colour in GROUP_COLORS.items():
-    mask = tsne_df["Group"] == group
-    ax.scatter(tsne_df.loc[mask, "tSNE1"],
-               tsne_df.loc[mask, "tSNE2"],
-               c=colour, label=group, s=50, alpha=0.85, edgecolors="none")
-ax.set_xlabel("t-SNE Dimension 1", fontsize=12)
-ax.set_ylabel("t-SNE Dimension 2", fontsize=12)
-ax.set_title("t-SNE (perplexity=30) — GSE120584 miRNA Expression", fontweight="bold")
-ax.legend(frameon=True, fontsize=10)
-plt.tight_layout()
-plt.savefig("results/tsne_perplexity30.png", dpi=150)
-plt.show()
-
-# ---- Perplexity sensitivity check ----
-# A responsible t-SNE analysis always checks multiple perplexity values.
-fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-for ax, perp in zip(axes, [10, 30, 50]):
-    ts = TSNE(n_components=2, perplexity=perp,
-              learning_rate="auto", n_iter=1000,
-              random_state=42, init="pca")
-    coords = ts.fit_transform(X_scaled)
-    for group, colour in GROUP_COLORS.items():
-        mask = meta["group"].values == group
-        ax.scatter(coords[mask, 0], coords[mask, 1],
-                   c=colour, label=group, s=40, alpha=0.8, edgecolors="none")
-    ax.set_title(f"t-SNE perplexity={perp}", fontweight="bold")
-    ax.set_xlabel("tSNE1")
-    ax.set_ylabel("tSNE2")
-    handles = [mpatches.Patch(color=c, label=g) for g, c in GROUP_COLORS.items()]
-    ax.legend(handles=handles, fontsize=8, frameon=True)
-plt.suptitle("t-SNE Sensitivity to Perplexity — GSE120584", fontsize=13, y=1.02)
-plt.tight_layout()
-plt.savefig("results/tsne_perplexity_comparison.png", dpi=150, bbox_inches="tight")
-plt.show()
-```
-
-> **Biological sidebar — Reading a t-SNE Plot:**
-> When you see AD samples clustered tightly together and control samples in a separate cluster, this means the AD samples share a miRNA expression pattern that is internally similar AND distinct from controls. This is what you hope to see — it suggests a consistent, reproducible AD miRNA signature exists in this dataset. If the AD cluster is diffuse and scattered across the plot, it may mean: (a) AD is biologically heterogeneous (true — AD has multiple subtypes), (b) the miRNA signal is weak relative to noise, or (c) confounders like age and sex are dominating the structure. The perplexity sensitivity check tells you whether the clusters you see are real: if a tight AD cluster appears at perplexity 10, 30, and 50, it is robust. If it only appears at one perplexity, it may be an artifact.
-
----
-
-### 3.3.4 t-SNE Interpretation Pitfalls
-
-t-SNE is one of the most commonly misinterpreted visualizations in computational biology. Here are the cardinal rules:
-
-**Rule 1: Cluster sizes in t-SNE are meaningless.**
-t-SNE distorts global distances to reveal local structure. A large cluster in t-SNE does not mean that group has more samples or greater biological variability. All clusters may appear similar in size even if the corresponding groups are biologically very different.
-
-**Rule 2: Distances between clusters are meaningless.**
-The distance between the AD cluster and the Control cluster in t-SNE 2D space cannot be interpreted as a measure of how different AD and control miRNA profiles are. Use PC1 separation or fold changes for that.
-
-**Rule 3: Shapes within clusters are not interpretable.**
-A crescent-shaped cluster, a circle, or a line — these shapes emerge from the t-SNE optimization algorithm and do not have direct biological meaning.
-
-**Rule 4: t-SNE is not reproducible without a fixed random seed.**
-Running t-SNE twice with different random seeds will produce different plots. Always set `random_state=42` (or any fixed value) and report it in your methods section.
-
-**How to tell if t-SNE is overfit:**
-- Run t-SNE with very low perplexity (5) and very high iterations (5000): if you get many tiny clusters of 1–3 samples each, the algorithm is fitting individual noise rather than real structure
-- Compare with PCA: if t-SNE shows 8 clusters but PCA shows 3 loose clouds, the additional t-SNE clusters are likely artificial
-- The number of t-SNE clusters should roughly match your biological expectations
-
----
-
-### 3.3.5 UMAP: A Modern Alternative
-
-UMAP (McInnes et al., 2018) addresses several t-SNE limitations:
-- It is **much faster** (especially for large datasets)
-- It **better preserves global structure** — clusters that are far apart in UMAP space truly are more dissimilar than clusters that are close
-- It is more **stable** across different hyperparameter settings
-
-The key hyperparameter is `n_neighbors`: the number of neighboring samples considered when constructing the local structure. Like perplexity in t-SNE, it controls the balance between local detail and global structure. Values of 10–30 are typical.
-
-```python
-# ============================================================
-# UMAP in Python using umap-learn
-# ============================================================
-import umap
-
-# Standard UMAP run
-reducer = umap.UMAP(
-    n_components  = 2,
-    n_neighbors   = 15,        # key hyperparameter (try 5, 15, 30)
-    min_dist      = 0.1,       # controls how tightly points are packed in 2D
-    metric        = "euclidean",
-    random_state  = 42
-)
-X_umap = reducer.fit_transform(X_scaled)
-
-umap_df = pd.DataFrame({
-    "UMAP1" : X_umap[:, 0],
-    "UMAP2" : X_umap[:, 1],
-    "Group" : meta["group"].values,
-    "Age"   : meta["age"].values,
-    "Sex"   : meta["sex"].values
-}, index=meta.index)
-
-# ---- UMAP coloured by group, age, and sex ----
-fig, axes = plt.subplots(1, 3, figsize=(20, 6))
-
-# Panel 1: Group
-for group, colour in GROUP_COLORS.items():
-    mask = umap_df["Group"] == group
-    axes[0].scatter(umap_df.loc[mask, "UMAP1"], umap_df.loc[mask, "UMAP2"],
-                    c=colour, label=group, s=50, alpha=0.85, edgecolors="none")
-axes[0].set_title("UMAP — Disease Group", fontweight="bold")
-axes[0].legend(fontsize=9)
-
-# Panel 2: Age (continuous colour scale)
-sc = axes[1].scatter(umap_df["UMAP1"], umap_df["UMAP2"],
-                     c=umap_df["Age"], cmap="RdYlBu_r", s=50, alpha=0.85)
-plt.colorbar(sc, ax=axes[1], label="Age (years)")
-axes[1].set_title("UMAP — Age (Continuous)", fontweight="bold")
-
-# Panel 3: Sex
-sex_colors = {"Male": "#2166AC", "Female": "#B2182B", "M": "#2166AC", "F": "#B2182B"}
-for sex_label in umap_df["Sex"].unique():
-    mask = umap_df["Sex"] == sex_label
-    col = sex_colors.get(sex_label, "#999999")
-    axes[2].scatter(umap_df.loc[mask, "UMAP1"], umap_df.loc[mask, "UMAP2"],
-                    c=col, label=sex_label, s=50, alpha=0.85, edgecolors="none")
-axes[2].set_title("UMAP — Sex", fontweight="bold")
-axes[2].legend(fontsize=9)
-
-for ax in axes:
-    ax.set_xlabel("UMAP1")
-    ax.set_ylabel("UMAP2")
-
-plt.suptitle("UMAP (n_neighbors=15) — GSE120584 miRNA Expression",
-             fontsize=14, fontweight="bold", y=1.02)
-plt.tight_layout()
-plt.savefig("results/umap_group_age_sex.png", dpi=150, bbox_inches="tight")
-plt.show()
-
-# ---- n_neighbors sensitivity check ----
-fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-for ax, nn in zip(axes, [5, 15, 30]):
-    u = umap.UMAP(n_components=2, n_neighbors=nn, min_dist=0.1,
-                  random_state=42)
-    coords = u.fit_transform(X_scaled)
-    for group, colour in GROUP_COLORS.items():
-        mask = meta["group"].values == group
-        ax.scatter(coords[mask, 0], coords[mask, 1],
-                   c=colour, label=group, s=40, alpha=0.8, edgecolors="none")
-    ax.set_title(f"UMAP n_neighbors={nn}", fontweight="bold")
-handles = [mpatches.Patch(color=c, label=g) for g, c in GROUP_COLORS.items()]
-axes[0].legend(handles=handles, fontsize=9)
-plt.suptitle("UMAP Sensitivity to n_neighbors — GSE120584")
-plt.tight_layout()
-plt.savefig("results/umap_nneighbors_comparison.png", dpi=150)
-plt.show()
-```
-
----
-
-### 3.3.6 When to Use Each Method
-
-| Situation | Recommended Method | Why |
-|-----------|-------------------|-----|
-| First exploratory look at data | **PCA** | Fast, interpretable loadings, reproducible |
-| Searching for subtle cluster structure | **UMAP** | Better global structure preservation; faster than t-SNE |
-| Confirming cluster structure for publication | **Both t-SNE and UMAP** | Clusters seen in both methods are more trustworthy |
-| Dataset > 10,000 samples | **UMAP** | t-SNE becomes very slow at large N |
-| Need to interpret which features drive clusters | **PCA** | Loadings are directly interpretable |
-| Want to show disease trajectory (preclinical → MCI → AD) | **UMAP** | Better at capturing continuous manifold structure |
-
-> **Critical note for biologists:** Neither t-SNE nor UMAP produces output that can be used as input to a statistical test. You cannot compute a p-value from a t-SNE cluster. You cannot say "the AD cluster is significantly different from the control cluster because they are far apart in t-SNE." These plots are visualizations for hypothesis generation, not statistical tests. The formal statistical comparisons come in Week 4 (differential expression analysis).
 
 ---
 
@@ -1121,7 +871,7 @@ if (all(c("age", "sex") %in% colnames(meta))) {
 
 ### 3.6.4 Identifying Sample Outliers
 
-Beyond formal QC metrics (NUSE, library size), EDA sometimes reveals outlier samples that passed Week 2 QC but are biologically anomalous — extreme samples in PCA/UMAP space that sit far from all other samples in their group.
+Beyond formal QC metrics (NUSE, library size), EDA sometimes reveals outlier samples that passed Week 2 QC but are biologically anomalous — extreme samples in PCA space that sit far from all other samples in their group.
 
 ```r
 # ============================================================
@@ -1228,61 +978,6 @@ print(table(meta$group))
 
 ---
 
-### Lab 3B — Python-Based t-SNE and UMAP (75 minutes)
-
-**Objective:** Generate and critically evaluate t-SNE and UMAP visualizations for the same dataset, learning to distinguish real biological structure from algorithmic artifacts.
-
-**Setup (in JupyterLab):**
-```python
-# The variance-filtered expression matrix is exported from R in Week 3 R script Section 9
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from sklearn.manifold import TSNE
-from sklearn.preprocessing import StandardScaler
-import umap
-
-expr = pd.read_csv("data/processed/GSE120584_expr_vf.csv", index_col=0)
-meta = pd.read_csv("data/processed/GSE120584_metadata_clean.csv", index_col=0)
-
-print(f"Expression matrix: {expr.shape[0]} miRNAs x {expr.shape[1]} samples")
-print(f"\nGroup counts:\n{meta['group'].value_counts()}")
-```
-
-**Tasks (complete in order):**
-
-1. **PCA in Python for comparison (10 min):**
-   ```python
-   from sklearn.decomposition import PCA
-
-   X = expr.T.values
-   X_scaled = StandardScaler().fit_transform(X)
-   pca = PCA(n_components=10)
-   X_pca = pca.fit_transform(X_scaled)
-   print("Variance explained by PC1:", round(pca.explained_variance_ratio_[0] * 100, 1), "%")
-   ```
-   Does Python's sklearn PCA give the same PC1 variance explained as R's prcomp? (It should, approximately.)
-
-2. **t-SNE sensitivity analysis (25 min):**
-   - Run t-SNE at perplexity = 10, 30, and 50 (use the comparison code from Module 3.3.3)
-   - For each perplexity: Does a distinct AD cluster emerge? Is it consistent?
-   - At which perplexity does the clustering look most consistent with your PCA result?
-   - Record: are there any individual samples that appear as isolated points far from their group's cluster at all perplexity values? These are the strongest outlier candidates.
-
-3. **UMAP analysis (25 min):**
-   - Run UMAP with n_neighbors = 5, 15, and 30
-   - Color the same UMAP plot three times: by Group, by Age, by Sex
-   - Which variable (Group, Age, Sex) seems to organize the UMAP structure most strongly?
-   - Compare the UMAP with the t-SNE plot at perplexity=30: do you see the same clusters in both plots? If yes, the structure is more likely to be real.
-
-4. **Critical evaluation (15 min):**
-   - Identify one cluster boundary in your t-SNE plot that disappears or changes shape when you change perplexity. Explain why this boundary is unreliable.
-   - Identify one cluster boundary that remains stable across all three perplexity values. This is a more trustworthy structure.
-   - Write one sentence describing what you would conclude about the AD miRNA signature from these t-SNE and UMAP plots — what can you say and what can you not say?
-
-**Deliverable:** A 4-panel figure (saved as PNG) showing: t-SNE at perplexity=30, UMAP colored by group, UMAP colored by age, UMAP colored by sex. Include a one-paragraph interpretation.
-
----
 
 ## WEEK 3 ASSIGNMENTS
 
@@ -1290,15 +985,10 @@ print(f"\nGroup counts:\n{meta['group'].value_counts()}")
 1. **Ringnér M (2008)** — *What is principal component analysis?* *Nature Biotechnology* 26(3):303–304. [DOI: 10.1038/nbt0308-303](https://doi.org/10.1038/nbt0308-303)  
    Focus on: Figure 1 (the geometric interpretation of PCA); the explanation of eigenvalues and loadings. This short commentary is the clearest non-mathematical explanation of PCA in the bioinformatics literature.
 
-2. **Becht E et al. (2019)** — *Dimensionality reduction for visualizing single-cell data using UMAP* *Nature Biotechnology* 37:38–44. [DOI: 10.1038/nbt.4314](https://doi.org/10.1038/nbt.4314)  
-   Focus on: The comparison between t-SNE and UMAP in Figure 2; the section on global structure preservation; the discussion of biological interpretation pitfalls.
-
 ### Reflection Questions (Discuss in Week 4 opening)
 1. You run PCA and find that PC1 explains 22% of variance and corresponds to disease group, while PC2 explains 18% and corresponds strongly to age (partial R² = 0.38 for age). What does this tell you about the relative contribution of disease biology vs aging to the miRNA expression pattern? How would you account for this in your Week 4 ML model design?
 
-2. Your t-SNE plot shows a tight, distinct cluster of 8 AD samples that sit far from the main AD cluster. In the heatmap, these same 8 samples form a separate block with a distinct miRNA expression pattern. Propose two biological explanations and one technical explanation for this sub-cluster. What experiments or metadata checks could help distinguish between them?
-
-3. The cluster purity analysis returns an overall purity of 0.68. A colleague says this is "too low to be useful." What would you say in response? What is the appropriate comparison baseline, and what does purity of 0.68 actually tell us about the dataset?
+2. The cluster purity analysis returns an overall purity of 0.68. A colleague says this is "too low to be useful." What would you say in response? What is the appropriate comparison baseline, and what does purity of 0.68 actually tell us about the dataset?
 
 ### Practical Exercise
 Using the heatmap generated in Lab 3A, extract the miRNA names from the largest cluster that shows high expression in AD samples and low expression in controls (a "high-in-AD" cluster). Look up these miRNAs in miRTarBase (https://mirtarbase.cuhk.edu.cn). Write a 3–5 sentence biological interpretation: What known targets do these miRNAs share? What biological pathways are they likely co-regulating? Is the pattern consistent with known AD biology?
@@ -1313,10 +1003,6 @@ Using the heatmap generated in Lab 3A, extract the miRNA names from the largest 
 | **Loading** | The coefficient of each original variable (miRNA) in a principal component; a large absolute loading means that miRNA contributes strongly to that PC's variance |
 | **Scree plot** | A bar chart of variance explained by each principal component in order; the "elbow" indicates the optimal number of PCs to retain |
 | **Biplot** | A PCA visualization showing both sample scores and feature loadings (as arrows) on the same axes |
-| **t-SNE** | t-Distributed Stochastic Neighbor Embedding; nonlinear dimensionality reduction that preserves local neighborhood structure; cluster distances and sizes are not interpretable |
-| **Perplexity** | The key hyperparameter of t-SNE; controls the effective number of neighbors; values of 10–50 are typical for biological datasets of 100–1000 samples |
-| **UMAP** | Uniform Manifold Approximation and Projection; nonlinear dimensionality reduction that is faster than t-SNE and better preserves global data structure |
-| **n_neighbors** | Key hyperparameter of UMAP; controls the balance between local and global structure; analogous to perplexity in t-SNE |
 | **Hierarchical clustering** | An agglomerative algorithm that iteratively merges samples into a tree (dendrogram) based on pairwise distances; no k needs to be specified in advance |
 | **Ward.D2 linkage** | A hierarchical clustering linkage method that minimizes within-cluster variance at each merge; produces compact, well-separated clusters; recommended for expression data |
 | **Dendrogram** | The tree diagram output of hierarchical clustering; branch height represents dissimilarity between merged groups |
@@ -1340,11 +1026,6 @@ All references retrieved from PubMed.
 
 2. Ringnér M (2008). What is principal component analysis? *Nat Biotechnol* 26(3):303–304. [DOI: 10.1038/nbt0308-303](https://doi.org/10.1038/nbt0308-303)
 
-3. van der Maaten L, Hinton G (2008). Visualizing data using t-SNE. *J Mach Learn Res* 9:2579–2605. Available at: http://www.jmlr.org/papers/v9/vandermaaten08a.html
-
-4. McInnes L, Healy J, Melville J (2018). UMAP: Uniform Manifold Approximation and Projection for Dimension Reduction. *arXiv* [stat.ML]. [DOI: 10.48550/arXiv.1802.03426](https://doi.org/10.48550/arXiv.1802.03426)
-
-5. Becht E et al. (2019). Dimensionality reduction for visualizing single-cell data using UMAP. *Nat Biotechnol* 37:38–44. [DOI: 10.1038/nbt.4314](https://doi.org/10.1038/nbt.4314)
 
 6. Tibshirani R, Walther G, Hastie T (2001). Estimating the number of clusters in a data set via the gap statistic. *J R Stat Soc Series B Stat Methodol* 63(2):411–423. [DOI: 10.1111/1467-9868.00293](https://doi.org/10.1111/1467-9868.00293)
 
