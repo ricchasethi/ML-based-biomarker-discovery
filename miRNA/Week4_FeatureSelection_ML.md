@@ -6,8 +6,8 @@
 ## Learning Objectives
 
 By the end of Week 4, you will be able to:
-1. Run a complete differential expression analysis using DESeq2 (RNA-seq) and limma-voom (microarray), correctly interpreting log2 fold changes, adjusted p-values, and shrinkage estimators in the context of blood miRNA biology
-2. Explain the dimensionality problem in machine learning and articulate why feature selection is mandatory before training a classifier on a dataset with ~500 miRNAs and fewer than 200 samples
+1. Run a complete differential expression analysis using limma (microarray, GSE120584) and DESeq2 (RNA-seq, GSE46579), correctly interpreting log2 fold changes, adjusted p-values, and shrinkage estimators in the context of blood miRNA biology
+2. Explain the dimensionality problem in machine learning and articulate why feature selection is mandatory before training a classifier on a dataset with hundreds of miRNAs — especially in typical cohorts of 100–200 samples such as our validation set GSE46579 (65 samples)
 3. Apply and compare three classes of feature selection methods — filter, wrapper, and embedded — and justify your choice of method for a given dataset
 4. Build, train, and evaluate logistic regression, SVM, and random forest classifiers for AD vs Control classification using scikit-learn, including proper train/test splitting and cross-validation
 5. Interpret model outputs in biological terms: what does it mean when miR-29b is the top feature in a random forest model, and how would you validate that finding experimentally?
@@ -40,8 +40,8 @@ For historical reasons, two complementary methods dominate miRNA differential ex
 
 | Method | Data Type | Statistical Model | When to Use |
 |--------|-----------|-------------------|-------------|
-| **DESeq2** | RNA-seq count data | Negative binomial generalized linear model | GSE120584 (sequencing) |
-| **limma-voom** | Microarray *or* RNA-seq | Linear model with precision weighting | GSE46579 (microarray); also valid for RNA-seq with large N |
+| **DESeq2** | RNA-seq count data | Negative binomial generalized linear model | GSE46579 (small RNA-seq) |
+| **limma-voom** | Microarray *or* RNA-seq | Linear model with precision weighting | GSE120584 (microarray; limma without voom); also valid for RNA-seq with large N |
 | **edgeR** | RNA-seq count data | Negative binomial (quasi-likelihood or exact test) | Alternative to DESeq2; especially good for very small N |
 
 Both approaches produce the same essential outputs: a table of miRNAs ranked by evidence for differential expression, with fold changes and multiple-testing-corrected p-values. The difference is in the underlying statistical assumptions and how they handle mean-variance relationships in the data.
@@ -56,85 +56,75 @@ limma (Linear Models for Microarray Analysis, Ritchie et al. 2015) was originall
 3. Computing precision weights for each observation that downweight noisy (low-count) features
 4. Fitting weighted linear models to the precision-weighted data
 
-For our purposes with **GSE46579** (Affymetrix microarray, already log2-normalized by RMA), we use limma without the voom step — the data is already on the appropriate scale.
+For our purposes with **GSE120584** (Toray 3D-Gene microarray, already log2-transformed and normalized by the submitters; Week 2), we use limma without the voom step — the data is already on the appropriate scale. We fit all three groups at once and adjust for sex and age, because Week 2 and Week 3 showed that AD patients are older and more often female than Controls.
 
 ```r
 # ============================================================
-# limma-voom pipeline for GSE46579 (microarray validation set)
+# limma pipeline for GSE120584 (microarray, primary dataset)
 # ============================================================
 
 library(limma)
-library(edgeR)
 
-# Load RMA-normalized expression matrix (output from Week 2)
-expr_rma  <- readRDS("data/processed/GSE46579_expr_rma.rds")
-meta_46   <- readRDS("data/processed/GSE46579_metadata_clean.rds")
+# Load the normalized log2 matrix and metadata (output from Week 2)
+expr_clean <- readRDS("data/processed/GSE120584_expr_clean.rds")   # 925 miRNAs × 1328 samples
+metadata   <- readRDS("data/processed/GSE120584_metadata_clean.rds")
 
 # Step 1: Set up the design matrix
-# The design matrix encodes the experimental design as a numeric matrix.
 # Each row = one sample; each column = one coefficient to estimate.
-#
-# ~ 0 + group gives us one coefficient per group (no intercept),
-# which makes contrasts more intuitive to write.
+# ~ 0 + group gives one coefficient per group (no intercept), which makes
+# contrasts easy to write. Group labels contain spaces and an apostrophe,
+# so we use short names inside the design.
+short_names <- c("Control" = "Control",
+                 "Mild Cognitive Impairment" = "MCI",
+                 "Alzheimer's Disease" = "AD")
+metadata$group_short <- factor(short_names[as.character(metadata$group)],
+                               levels = c("Control", "MCI", "AD"))
 
-meta_46$group <- factor(meta_46$group,
-                        levels = c("Control", "Alzheimer's Disease"))
-
-design <- model.matrix(~ 0 + group, data = meta_46)
-colnames(design) <- levels(meta_46$group)  # clean column names
-# design is now: rows = samples, columns = "Control", "Alzheimer's Disease"
+design <- model.matrix(~ 0 + group_short + sex + age, data = metadata)
+colnames(design) <- sub("^group_short", "", colnames(design))
+colnames(design)   # "Control" "MCI" "AD" "sexmale" "age"
 
 # Step 2: Fit linear models to each miRNA
-# lmFit estimates the linear model coefficients (mean expression per group)
-# for each miRNA simultaneously.
-fit <- lmFit(expr_rma, design)
+# lmFit estimates the coefficients (group means, sex and age effects)
+# for every miRNA simultaneously.
+fit <- lmFit(expr_clean, design)
 
-# Step 3: Define contrasts
-# A contrast specifies the comparison of interest.
-# AD - Control = the effect of AD status on miRNA expression
+# Step 3: Define contrasts — the comparisons of interest
 contrast_matrix <- makeContrasts(
-  AD_vs_Control = "Alzheimer's Disease" - Control,
+  AD_vs_Control  = AD  - Control,
+  MCI_vs_Control = MCI - Control,
+  AD_vs_MCI      = AD  - MCI,
   levels = design
 )
-
-# Apply the contrast to the fitted model
 fit2 <- contrasts.fit(fit, contrast_matrix)
 
 # Step 4: Empirical Bayes moderation
 # eBayes "borrows strength" across all miRNAs to better estimate each miRNA's
-# variance. This is the key innovation of limma: instead of estimating variance
-# from just the samples for one miRNA (unreliable with small N), it pools
-# variance information across thousands of miRNAs.
-#
-# This moderation is why limma outperforms simple t-tests for genomics:
-# a miRNA that looks very variable but is consistently variable across the
-# whole dataset gets treated appropriately.
-fit2 <- eBayes(fit2, trend = TRUE)   # trend=TRUE: model mean-variance trend
+# variance: each miRNA's variance is shrunk toward a common prior.
+# This moderation is why limma outperforms simple t-tests for genomics.
+fit2 <- eBayes(fit2, trend = TRUE)   # trend=TRUE: variance may depend on expression level
 
-# Step 5: Extract results table
-# topTable returns results sorted by adjusted p-value
-# coef = the name or number of the contrast to report
+# Step 5: Extract results table for one contrast
 results_limma <- topTable(
   fit2,
-  coef   = "AD_vs_Control",
-  number = Inf,             # return ALL miRNAs, not just top 10
-  adjust = "BH",            # Benjamini-Hochberg FDR correction
+  coef    = "AD_vs_Control",
+  number  = Inf,             # return ALL miRNAs, not just top 10
+  adjust  = "BH",            # Benjamini-Hochberg FDR correction
   sort.by = "P"
 )
 
 # The results table contains:
-#   logFC    -- log2 fold change (AD relative to Control)
-#   AveExpr  -- average log2 expression across all samples
-#   t        -- moderated t-statistic
-#   P.Value  -- raw p-value
+#   logFC     -- log2 fold change (AD relative to Control)
+#   AveExpr   -- average log2 expression across all samples
+#   t         -- moderated t-statistic
+#   P.Value   -- raw p-value
 #   adj.P.Val -- Benjamini-Hochberg FDR-adjusted p-value
-#   B        -- log-odds of differential expression (B > 0 means more likely DE)
+#   B         -- log-odds of differential expression (B > 0 means more likely DE)
 
-cat("Number of DE miRNAs (FDR < 0.05):", sum(results_limma$adj.P.Val < 0.05), "\n")
-cat("  Upregulated in AD (logFC > 0):",
-    sum(results_limma$adj.P.Val < 0.05 & results_limma$logFC > 0), "\n")
-cat("  Downregulated in AD (logFC < 0):",
-    sum(results_limma$adj.P.Val < 0.05 & results_limma$logFC < 0), "\n")
+lfc_cut <- 0.3   # see Section 4.1.5 for why 0.3 on this array
+sig_AD  <- results_limma[results_limma$adj.P.Val < 0.05 & abs(results_limma$logFC) > lfc_cut, ]
+cat("Significant (FDR < 0.05, |logFC| > 0.3):", nrow(sig_AD), "\n")   # 49
+cat("  Up in AD:", sum(sig_AD$logFC > 0), " Down in AD:", sum(sig_AD$logFC < 0), "\n")  # 45 / 4
 ```
 
 ---
@@ -161,9 +151,10 @@ The contrast `AD - Control` then computes `beta_AD - beta_Control` for each miRN
 **Including covariates:** If your metadata includes age and sex, you can include them as covariates to increase statistical power and control for confounding:
 
 ```r
-# Design with covariates (recommended when N is sufficient)
-design_cov <- model.matrix(~ 0 + group + age + sex, data = meta_46)
-# The contrast remains the same; limma will account for age and sex effects
+# Design with covariates — what the Week 4 script uses for GSE120584
+design_cov <- model.matrix(~ 0 + group_short + sex + age, data = metadata)
+# The contrasts remain the same; limma estimates the group effects
+# after accounting for age and sex
 ```
 
 ---
@@ -215,6 +206,8 @@ A logFC of 1.0 for a serum miRNA in AD means the **average circulating level is 
 
 However, fold change alone does not determine clinical utility. A miRNA with logFC = 2.0 but very high variance within each group might be completely useless as a biomarker, while a miRNA with logFC = 0.8 and extremely low within-group variance could be highly discriminative. This is why ML models — which model the full distribution, not just group means — often identify better biomarkers than simple fold-change rankings.
 
+> **Fold changes on a microarray are compressed.** Background fluorescence, cross-hybridization and a limited dynamic range make array fold changes smaller than the true biological differences — and smaller than RNA-seq fold changes for the same biology. In GSE120584, **449 of 925 miRNAs pass FDR < 0.05 for AD vs Control, yet the largest |log2FC| is only 0.43** (1.35-fold). The usual RNA-seq cut-off of |log2FC| > 0.5 (or 1) would keep nothing. At the same time, with > 1,000 samples even tiny differences become "significant", so a fold-change cut-off is still needed. The Week 4 script therefore uses **|log2FC| > 0.3** (≈ 1.23-fold) for GSE120584 and 0.5 for the RNA-seq dataset GSE46579. Always choose the cut-off with the platform in mind — and report it.
+
 ---
 
 ### 4.1.6 Volcano Plot and MA Plot
@@ -229,8 +222,8 @@ library(ggrepel)
 volcano_df <- results_limma
 volcano_df$miRNA <- rownames(volcano_df)
 volcano_df$significance <- "Not Significant"
-volcano_df$significance[volcano_df$adj.P.Val < 0.05 & volcano_df$logFC > 0.5]  <- "Up in AD"
-volcano_df$significance[volcano_df$adj.P.Val < 0.05 & volcano_df$logFC < -0.5] <- "Down in AD"
+volcano_df$significance[volcano_df$adj.P.Val < 0.05 & volcano_df$logFC > 0.3]  <- "Up in AD"
+volcano_df$significance[volcano_df$adj.P.Val < 0.05 & volcano_df$logFC < -0.3] <- "Down in AD"
 volcano_df$significance <- factor(volcano_df$significance,
                                   levels = c("Not Significant", "Up in AD", "Down in AD"))
 
@@ -241,7 +234,7 @@ p_volcano <- ggplot(volcano_df,
                     aes(x = logFC, y = -log10(P.Value), colour = significance)) +
   geom_point(alpha = 0.6, size = 1.5) +
   geom_point(data = top15, size = 2.5, alpha = 0.9) +
-  geom_vline(xintercept = c(-0.5, 0.5), linetype = "dashed",
+  geom_vline(xintercept = c(-0.3, 0.3), linetype = "dashed",
              colour = "grey40", linewidth = 0.4) +
   geom_hline(yintercept = -log10(0.05), linetype = "dashed",
              colour = "grey40", linewidth = 0.4) +
@@ -259,11 +252,11 @@ p_volcano <- ggplot(volcano_df,
                "Down in AD"      = "#4575B4")
   ) +
   labs(
-    title    = "Volcano Plot: AD vs Control (GSE46579, limma)",
+    title    = "Volcano Plot: AD vs Control (GSE120584, limma)",
     x        = "log2 Fold Change (AD / Control)",
     y        = "-log10(P-value)",
     colour   = NULL,
-    caption  = "Dashed lines: |logFC| > 0.5 and p < 0.05 (uncorrected)"
+    caption  = "Dashed lines: |logFC| > 0.3 and p < 0.05 (uncorrected)"
   ) +
   theme_bw(base_size = 12) +
   theme(
@@ -284,7 +277,7 @@ ma_df <- volcano_df
 p_ma <- ggplot(ma_df, aes(x = AveExpr, y = logFC, colour = significance)) +
   geom_point(alpha = 0.5, size = 1.2) +
   geom_hline(yintercept = 0, colour = "black", linewidth = 0.5) +
-  geom_hline(yintercept = c(-0.5, 0.5), linetype = "dashed",
+  geom_hline(yintercept = c(-0.3, 0.3), linetype = "dashed",
              colour = "grey40", linewidth = 0.4) +
   scale_colour_manual(
     values = c("Not Significant" = "grey70",
@@ -292,7 +285,7 @@ p_ma <- ggplot(ma_df, aes(x = AveExpr, y = logFC, colour = significance)) +
                "Down in AD"      = "#4575B4")
   ) +
   labs(
-    title  = "MA Plot: AD vs Control (GSE46579, limma)",
+    title  = "MA Plot: AD vs Control (GSE120584, limma)",
     x      = "Average log2 Expression (A)",
     y      = "log2 Fold Change (M)",
     colour = NULL
@@ -305,6 +298,48 @@ ggsave("results/ma_plot_limma_AD_vs_Control.png", p_ma, width = 8, height = 5, d
 ```
 
 **Interpreting the MA plot:** In a well-normalized dataset, the cloud of points should be centered around M = 0 across the full range of expression levels (A-axis). If low-expression miRNAs show a systematic upward or downward trend, this indicates a normalization issue. Most DE miRNAs (colored points) should be scattered at various expression levels — if they cluster only at high expression levels, you may be missing DE miRNAs at low expression due to insufficient statistical power.
+
+> **What the GSE120584 volcano plot shows:** it is strongly asymmetric — 45 of the 49 significant miRNAs are **up** in AD, most of them low-abundance miRNAs close to the detection floor (many poorly characterised miR-6xxx-3p species; the top hit is hsa-miR-6761-3p, log2FC +0.43). None of the Week 1 "classic" AD miRNAs is among them. Because Week 2 showed that AD samples detect more miRNAs above background than Controls, part of this signal may be technical. A lopsided volcano plot is a prompt to look for a technical explanation before a biological one.
+
+---
+
+### 4.1.7 MCI vs Control, AD vs MCI and the Three-Way Summary
+
+All three comparisons come from the same limma fit — just ask `topTable()` for a different contrast:
+
+```r
+res_MCI    <- topTable(fit2, coef = "MCI_vs_Control", number = Inf, sort.by = "P")
+res_AD_MCI <- topTable(fit2, coef = "AD_vs_MCI",      number = Inf, sort.by = "P")
+
+sig_MCI    <- res_MCI[res_MCI$adj.P.Val < 0.05 & abs(res_MCI$logFC) > lfc_cut, ]
+sig_AD_MCI <- res_AD_MCI[res_AD_MCI$adj.P.Val < 0.05 & abs(res_AD_MCI$logFC) > lfc_cut, ]
+nrow(sig_MCI)      # 44 (all up in MCI)
+nrow(sig_AD_MCI)   # 0
+
+# Progressive markers: significant in both, same direction
+common      <- intersect(rownames(sig_AD), rownames(sig_MCI))
+progressive <- common[sign(sig_AD[common, "logFC"]) == sign(sig_MCI[common, "logFC"])]
+length(progressive)   # 12
+```
+
+Understanding which miRNAs change at each disease stage is biologically crucial:
+
+- **MCI vs Control only:** Potential *early detection* biomarkers — change before dementia onset
+- **AD vs Control only:** *Disease-stage* markers — reflect advanced pathology
+- **MCI vs Control AND AD vs Control (same direction):** *Progressive* markers — change early and worsen
+- **AD vs MCI:** Markers that distinguish conversion from MCI to AD — potential *progression* monitoring markers
+
+```
+DISEASE CONTINUUM:
+  Normal -> [MCI vs Control changes] -> MCI -> [AD vs MCI changes] -> AD
+         <------------------------------------------------------------->
+                          AD vs Control (combined signal)
+```
+
+Biologically, miRNAs that change progressively across all three stages (Control -> MCI -> AD, monotonically) are the most compelling biomarker candidates. These "stepwise" miRNAs reflect continuous biological deterioration rather than a single threshold event.
+
+> **Power matters:** GSE120584 has only 32 MCI samples. "Late" markers — significant in AD vs Control but not in MCI vs Control — mostly show the *same* direction and nearly the same size of change in MCI (e.g. miR-3184-5p: log2FC −0.32 in AD, −0.28 in MCI, FDR 0.056). "Not significant in MCI" is absence of evidence, not evidence of absence. Together with zero AD vs MCI differences, the data fit an early shared change better than a stepwise progression.
+
 
 ---
 
@@ -319,47 +354,40 @@ The three key innovations of DESeq2 are:
 2. **Empirical Bayes dispersion estimation** — shares dispersion information across miRNAs to stabilize estimates from small N
 3. **Log fold change shrinkage (lfcShrink)** — pulls extreme fold changes from noisy, low-count miRNAs toward zero, producing more reliable estimates
 
+In this course DESeq2 is used for the **RNA-seq validation dataset, GSE46579** (whole blood; AD vs Control — this cohort has no MCI group). DESeq2 needs **raw counts**, never VST or log values: it normalizes internally.
+
 ```r
 # ============================================================
-# DESeq2 differential expression -- GSE120584 (RNA-seq)
-# Three pairwise comparisons:
-#   1. AD vs Control
-#   2. MCI vs Control
-#   3. AD vs MCI
+# DESeq2 differential expression -- GSE46579 (small RNA-seq)
+# One comparison: AD vs Control
 # ============================================================
 
 library(DESeq2)
-library(ggplot2)
-library(dplyr)
 
-# Load objects from Week 2/3
-counts_filtered <- readRDS("data/processed/GSE120584_counts_filtered.rds")
-metadata        <- readRDS("data/processed/GSE120584_metadata_clean.rds")
+# Load objects from Week 2
+counts_46 <- readRDS("data/processed/GSE46579_counts_filtered.rds")   # 273 miRNAs × 65 samples
+meta_46   <- readRDS("data/processed/GSE46579_metadata_clean.rds")
 
-# Re-create (or load) the DESeqDataSet
-metadata$group <- factor(metadata$group,
-                         levels = c("Control", "Mild Cognitive Impairment",
-                                    "Alzheimer's Disease"))
+meta_46$group      <- factor(meta_46$group, levels = c("Control", "Alzheimer's Disease"))
+meta_46$sex        <- factor(meta_46$sex)
+meta_46$age_scaled <- as.numeric(scale(meta_46$age))   # numeric covariates fit best on a small scale
 
-dds <- DESeqDataSetFromMatrix(
-  countData = counts_filtered,
-  colData   = metadata,
-  design    = ~ group   # extend to ~ sex + age + group if covariates available
+dds_46 <- DESeqDataSetFromMatrix(
+  countData = counts_46,
+  colData   = meta_46,
+  design    = ~ sex + age_scaled + group
 )
 
 # Relevel: Control is the reference level
-dds$group <- relevel(dds$group, ref = "Control")
+dds_46$group <- relevel(dds_46$group, ref = "Control")
 
 # Run DESeq2 (estimates size factors, dispersions, and fits the GLM)
-# This is the main computation -- may take 1-5 minutes on full dataset
-dds <- DESeq(dds)
+dds_46 <- DESeq(dds_46)
 
 # Check what coefficients were estimated
-resultsNames(dds)
-# Typical output:
-# [1] "Intercept"
-# [2] "group_Mild.Cognitive.Impairment_vs_Control"
-# [3] "group_Alzheimer.s.Disease_vs_Control"
+resultsNames(dds_46)
+# [1] "Intercept"  "sex_male_vs_female"  "age_scaled"
+# [4] "group_Alzheimer.s.Disease_vs_Control"
 ```
 
 ---
@@ -374,14 +402,14 @@ Without shrinkage, miRNAs with very few counts show extreme (but unreliable) fol
 
 ```r
 # ---- Comparison 1: AD vs Control ----
-res_AD_vs_Control <- lfcShrink(
-  dds,
+res_46 <- lfcShrink(
+  dds_46,
   coef = "group_Alzheimer.s.Disease_vs_Control",
   type = "apeglm"   # apeglm: best shrinkage method (Zhu et al. 2019)
 )
 
 # Convert to data frame and sort by adjusted p-value
-res_AD_df <- as.data.frame(res_AD_vs_Control)
+res_AD_df <- as.data.frame(res_46)
 res_AD_df$miRNA <- rownames(res_AD_df)
 res_AD_df <- res_AD_df[order(res_AD_df$padj, na.last = TRUE), ]
 
@@ -390,13 +418,17 @@ sig_AD <- res_AD_df[!is.na(res_AD_df$padj) &
                     res_AD_df$padj < 0.05 &
                     abs(res_AD_df$log2FoldChange) > 0.5, ]
 
-cat("=== AD vs Control ===\n")
+cat("=== AD vs Control (GSE46579, DESeq2) ===\n")
 cat("Total miRNAs tested:", nrow(res_AD_df), "\n")
 cat("Significant (FDR < 0.05, |log2FC| > 0.5):", nrow(sig_AD), "\n")
 cat("  Upregulated in AD:", sum(sig_AD$log2FoldChange > 0), "\n")
 cat("  Downregulated in AD:", sum(sig_AD$log2FoldChange < 0), "\n")
 print(head(sig_AD[, c("miRNA", "log2FoldChange", "lfcSE", "pvalue", "padj")], 15))
 ```
+
+**Result for GSE46579:** 273 miRNAs tested; 105 pass FDR < 0.05, and **77** pass FDR < 0.05 and |log2FC| > 0.5 (30 up, 47 down in AD). The top hits — hsa-let-7f-5p and hsa-miR-98, both down in AD — have log2FC around −0.9 to −1.0: RNA-seq fold changes are much larger than the array's.
+
+> If `apeglm` is not installed, the Week 4 script falls back to `type = "normal"`; install it with `BiocManager::install("apeglm")`.
 
 ---
 
@@ -415,69 +447,40 @@ print(head(sig_AD[, c("miRNA", "log2FoldChange", "lfcSE", "pvalue", "padj")], 15
 
 ---
 
-### 4.2.4 MCI vs Control and AD vs MCI Comparisons
+### 4.2.4 Contrasts That Are Not Coefficients: type = "ashr"
+
+GSE46579 has only two groups, so AD vs Control is a single named coefficient and `type = "apeglm"` works. In a DESeq2 design with **three** groups and Control as the reference (e.g., a sequencing cohort with an MCI group), the named coefficients would be `MCI_vs_Control` and `AD_vs_Control` only. AD vs MCI is then a *difference* of coefficients, expressed as a contrast — and apeglm cannot shrink it:
 
 ```r
-# ---- Comparison 2: MCI vs Control ----
-res_MCI_vs_Control <- lfcShrink(
-  dds,
-  coef = "group_Mild.Cognitive.Impairment_vs_Control",
-  type = "apeglm"
-)
-
-res_MCI_df <- as.data.frame(res_MCI_vs_Control)
-res_MCI_df$miRNA <- rownames(res_MCI_df)
-res_MCI_df <- res_MCI_df[order(res_MCI_df$padj, na.last = TRUE), ]
-
-sig_MCI <- res_MCI_df[!is.na(res_MCI_df$padj) &
-                      res_MCI_df$padj < 0.05 &
-                      abs(res_MCI_df$log2FoldChange) > 0.5, ]
-
-cat("\n=== MCI vs Control ===\n")
-cat("Significant:", nrow(sig_MCI), "\n")
-
-# ---- Comparison 3: AD vs MCI ----
-# This comparison is not a direct coefficient in our model (which is Control-referenced).
-# We must use contrast syntax to specify it explicitly.
-# For shrinkage of contrast-based results, use type="ashr" (works with arbitrary contrasts)
-
-res_AD_vs_MCI_shrunk <- lfcShrink(
+# Illustration for a three-group count dataset (not needed for GSE46579)
+res_AD_vs_MCI <- lfcShrink(
   dds,
   contrast = c("group", "Alzheimer's Disease", "Mild Cognitive Impairment"),
-  type = "ashr"    # ashr works with arbitrary contrasts
+  type     = "ashr"      # ashr works with arbitrary contrasts
 )
-
-res_AD_MCI_df <- as.data.frame(res_AD_vs_MCI_shrunk)
-res_AD_MCI_df$miRNA <- rownames(res_AD_MCI_df)
-res_AD_MCI_df <- res_AD_MCI_df[order(res_AD_MCI_df$padj, na.last = TRUE), ]
-
-sig_AD_MCI <- res_AD_MCI_df[!is.na(res_AD_MCI_df$padj) &
-                             res_AD_MCI_df$padj < 0.05 &
-                             abs(res_AD_MCI_df$log2FoldChange) > 0.5, ]
-
-cat("\n=== AD vs MCI ===\n")
-cat("Significant:", nrow(sig_AD_MCI), "\n")
 ```
+
+(Alternatively, re-level the factor so MCI is the reference and use apeglm on the new coefficient.) In GSE120584 the three-group comparisons are done with limma (Section 4.1.7), which needs no fold-change shrinkage: limma models continuous log2 values and its `eBayes()` step moderates the **variances** instead.
 
 ---
 
-### 4.2.5 Three-Way Comparison Summary and Overlap
+### 4.2.5 Cross-Dataset Overlap: Does the Signal Replicate?
 
-Understanding which miRNAs change at each disease stage is biologically crucial:
+miRNAs that are significant in **both** the serum microarray (GSE120584, limma) and the whole-blood RNA-seq (GSE46579, DESeq2) are far more trustworthy than those significant in only one — dataset-specific findings can reflect platform artefacts, cohort-specific confounding, or batch effects.
 
-- **MCI vs Control only:** Potential *early detection* biomarkers — change before dementia onset
-- **AD vs Control only:** *Disease-stage* markers — reflect advanced pathology
-- **MCI vs Control AND AD vs Control (same direction):** *Progressive* markers — change early and worsen
-- **AD vs MCI:** Markers that distinguish conversion from MCI to AD — potential *progression* monitoring markers
-
-```
-DISEASE CONTINUUM:
-  Normal -> [MCI vs Control changes] -> MCI -> [AD vs MCI changes] -> AD
-         <------------------------------------------------------------->
-                          AD vs Control (combined signal)
+```r
+overlap <- intersect(rownames(sig_AD), sig_46$miRNA)   # names must match exactly here
 ```
 
-Biologically, miRNAs that change progressively across all three stages (Control -> MCI -> AD, monotonically) are the most compelling biomarker candidates. These "stepwise" miRNAs reflect continuous biological deterioration rather than a single threshold event.
+**Result:** only **69** miRNA names are tested in both datasets (GSE46579 uses miRBase v18 names, e.g. `hsa-miR-98` instead of `hsa-miR-98-5p`; Week 5 fixes this with miRBaseConverter), and only **1** miRNA — hsa-miR-4435, up in AD in both — is significant in both lists.
+
+Why so little overlap?
+- **Naming:** different miRBase versions hide shared miRNAs (Week 5)
+- **Platform:** array and sequencing detect different miRNAs with different sensitivity; many GSE120584 hits are barely detected by RNA-seq
+- **Sample type:** serum is cell-free; whole blood is dominated by red- and white-cell miRNAs
+- **Cohort and power:** different populations, age and sex structures; only 65 samples in GSE46579
+
+A high overlap with **low direction concordance** would additionally suggest a labelling error or a confounder acting differently in each cohort.
 
 ---
 
@@ -485,7 +488,7 @@ Biologically, miRNAs that change progressively across all three stages (Control 
 
 ### 4.3.1 The Dimensionality Problem in Machine Learning
 
-Consider the central challenge of our dataset: we have approximately **150 samples** (AD and Control from GSE120584) and approximately **500 miRNA features** after QC filtering. This is a **p >> n** problem: more features (p = 500) than samples (n = 150).
+Consider the central challenge of miRNA biomarker datasets: many published cohorts have around **100–200 samples** but **several hundred miRNA features** after QC filtering. This is a **p >> n** problem: more features than samples. Our validation cohort GSE46579 is in this situation (273 miRNAs, 65 samples). GSE120584 is unusually large (1,296 AD + Control samples, ~700 features), so n > p — but with a weak, diffuse signal, the risk of fitting noise remains, and feature selection still matters.
 
 **Why this is catastrophically bad for ML without feature selection:**
 
@@ -723,9 +726,11 @@ Output: p = 0.78 -> Classify as AD (p > 0.5)
 
 Before any model is trained, you must split your data into a **training set** and a **test set**. The model is trained *only* on the training data and evaluated *only* on the test data. This simulates applying the model to new, unseen patients.
 
-**Why 80/20 split?** With ~150 samples, an 80/20 split gives:
-- Training set: ~120 samples — enough for stable model fitting
-- Test set: ~30 samples — enough for meaningful performance estimation
+**Why 80/20 split?** With the 1,296 AD + Control samples of GSE120584, an 80/20 split gives:
+- Training set: ~1,037 samples — enough for stable model fitting
+- Test set: ~259 samples (about 202 AD and 57 Control) — enough for a reasonably precise performance estimate
+
+In a typical cohort of ~150 samples the test set would hold only ~30 samples, which is why cross-validation (Section 4.7.5) matters so much for smaller studies.
 
 **Why stratified split?** Ensures that both training and test sets have the same proportion of AD and Control samples. Without stratification, you might get (by chance) all AD samples in training and all Control in test — a useless split.
 
@@ -1215,7 +1220,7 @@ plt.show()
 
 ### 4.7.4 Why AUC Alone Is Insufficient: The Imbalanced Class Problem
 
-Our dataset from GSE120584 has roughly equal class sizes (AD ~50, Control ~50), so class imbalance is not severe here. However, in real clinical cohorts and many GEO datasets, AD patients may be a small minority of samples tested. Understanding why AUC can mislead is critical for future work.
+Our dataset from GSE120584 is **strongly imbalanced**: 1,009 AD vs 287 Control (78% AD), and only 32 MCI in the three-class problem. A classifier that calls everyone "AD" is already 78% accurate. In real screening settings the imbalance usually runs the other way, with AD a small minority. Either way, understanding why accuracy and AUC can mislead is critical.
 
 **Scenario:** 10 AD patients, 90 Controls (10% prevalence — realistic in a memory clinic).
 
@@ -1261,7 +1266,7 @@ plt.show()
 
 ### 4.7.5 Cross-Validation for Unbiased AUC Estimates
 
-A test set of ~30 samples (from an 80/20 split of 150 samples) is too small to reliably estimate true AUC. **Cross-validation** uses all data for both training and testing by repeatedly splitting the data into folds:
+In a typical cohort of ~150 samples, a test set of ~30 samples (from an 80/20 split) is too small to reliably estimate true AUC; even with GSE120584's larger test set, a single split gives a noisier estimate than using all the data. **Cross-validation** uses all data for both training and testing by repeatedly splitting the data into folds:
 
 ```python
 from sklearn.model_selection import cross_val_score, StratifiedKFold
@@ -1342,7 +1347,7 @@ Imagine your random forest model identifies **miR-29b-3p** as the most important
 
 **Step 2 — Check the target biology.** miR-29b-3p directly targets **BACE1** (beta-site APP cleaving enzyme 1), the enzyme that cleaves amyloid precursor protein (APP) to produce the amyloidogenic Abeta peptide. Reduced miR-29b leads to elevated BACE1, which leads to increased Abeta production, which leads to amyloid plaque formation. This is the most direct mechanistic link between a miRNA and the central pathological event in AD.
 
-**Step 3 — Check consistency across datasets.** Does miR-29b-3p also appear in the top features from your limma analysis of GSE46579? Does it appear in published biomarker panels (Zhao et al. 2020: yes, miR-29 family members appear in their 12-miRNA signature)?
+**Step 3 — Check consistency across datasets.** Does miR-29b-3p also appear in the top features from your DESeq2 analysis of GSE46579? (In our data it is not among the significant GSE120584 miRNAs at all — a reminder that textbook AD miRNAs do not always reappear in a new cohort.) Does it appear in published biomarker panels (Zhao et al. 2020: yes, miR-29 family members appear in their 12-miRNA signature)?
 
 **Step 4 — Assess feature importance stability.** Run the random forest 100 times with different random seeds. If miR-29b-3p appears in the top 10 features in more than 80% of runs, it is a stable finding. If its rank fluctuates widely, it may be co-linear with another feature.
 
@@ -1365,17 +1370,17 @@ This is the **biology-first principle** in action: computational analysis genera
 
 **Tasks:**
 1. Open `Week4_DE_FeatureSelection.R` in RStudio
-2. Run Sections 1 through 4 (load data, DESeq2 AD vs Control, MCI vs Control, AD vs MCI)
+2. Run Sections 1 through 4 (load data; limma on GSE120584: AD vs Control, MCI vs Control, AD vs MCI)
 3. Inspect the results tables — identify the top 10 upregulated and top 10 downregulated miRNAs for each comparison
-4. Run Section 6 (volcano plot) — save the plot and identify which labeled miRNAs you recognize from the Week 1 literature review
-5. Run Section 8 (limma-voom on GSE46579) — compare the top 20 DE miRNAs with your DESeq2 results
-6. Run Section 9 (overlap analysis) — which miRNAs are consistently DE in both datasets?
-7. Run Sections 10 and 11 (univariate feature selection and export)
+4. Run Section 5 (volcano and MA plots) — save the plots and identify which labeled miRNAs you recognize from the Week 1 literature review
+5. Run Section 6 (DESeq2 on GSE46579) — compare the top 20 DE miRNAs with your limma results
+6. Run Section 7 (overlap analysis) — which miRNAs are consistently DE in both datasets?
+7. Run Sections 8–10 (Mann-Whitney filter, consensus table, export)
 
 **Checkpoint questions before proceeding to Lab 4B:**
 - What is the fold change (linear scale, not log2) for your top ranked miRNA?
-- How many miRNAs pass FDR < 0.05 AND |log2FC| > 0.5 in the AD vs Control comparison?
-- How many miRNAs overlap between the DESeq2 and limma significant lists?
+- How many miRNAs pass FDR < 0.05 AND |log2FC| > 0.3 in the GSE120584 AD vs Control comparison — and how many pass FDR < 0.05 alone?
+- How many miRNAs overlap between the limma (GSE120584) and DESeq2 (GSE46579) significant lists?
 
 ---
 
