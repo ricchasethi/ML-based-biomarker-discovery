@@ -6,7 +6,7 @@
 ## Learning Objectives
 
 By the end of Week 3, you will be able to:
-1. Compute and interpret descriptive statistics for miRNA expression data, including coefficient of variation, sparsity, and zero-inflation, and explain what these statistics reveal about data quality and biological signal
+1. Compute and interpret descriptive statistics for miRNA expression data, including coefficient of variation, detection (floor values on arrays, zero-inflation in counts), and explain what these statistics reveal about data quality and biological signal
 2. Perform Principal Component Analysis on a miRNA expression matrix, interpret scree plots and loadings, and explain in biological terms what each principal component captures
 3. Execute hierarchical and k-means clustering, evaluate optimal cluster number using gap statistic and silhouette width, and compute cluster purity against known disease groups
 4. Produce and read a publication-quality annotated heatmap of miRNA expression, interpreting row and column structure in terms of disease biology
@@ -20,11 +20,11 @@ When a clinician sees a new patient for the first time, they do not immediately 
 
 **Exploratory Data Analysis (EDA)** is the systematic examination of a dataset — its structure, its variation, its distributions, its outliers, and its relationships — before any supervised modeling. In the context of our miRNA Alzheimer's disease dataset, EDA serves four essential purposes:
 
-**1. Catching problems that QC missed.** Week 2 removed technically failed samples. EDA catches subtler issues: miRNAs that are zero in >80% of samples, outlier samples that passed QC metrics but sit far from all biological clusters in PCA space, or confounders (age, sex) that account for more variance than disease group.
+**1. Catching problems that QC missed.** Week 2 removed technically failed samples. EDA catches subtler issues: miRNAs that sit at the detection floor in most samples, outlier samples that passed QC metrics but sit far from all biological clusters in PCA space, or confounders (age, sex) that account for more variance than disease group.
 
 **2. Building biological intuition.** Before you ask a machine learning model "which miRNAs discriminate AD from controls?", you should have a personal sense of the data. Which miRNAs are most variable? Do the AD and control samples look visually separable? Which samples are the most unusual? EDA builds the biological intuition that lets you critically evaluate ML outputs rather than passively accept them.
 
-**3. Informing modeling decisions.** The dimensionality of your data (148 samples × 300 miRNAs), the degree of class separation visible in PCA, the presence of confounders — all of these findings from EDA directly determine choices in Week 4: how many features to carry into ML, whether to include age/sex as covariates, which cross-validation strategy to use.
+**3. Informing modeling decisions.** The dimensionality of your data (~1,330 samples × ~700–900 miRNAs), the degree of class separation visible in PCA, the presence of confounders — all of these findings from EDA directly determine choices in Week 4: how many features to carry into ML, whether to include age/sex as covariates, which cross-validation strategy to use.
 
 **4. Generating preliminary biological hypotheses.** A miRNA that appears in the top cluster-defining rows of a heatmap, and whose cluster separates AD from control perfectly, is a candidate worth investigating mechanistically — even before the formal differential expression analysis.
 
@@ -39,9 +39,9 @@ When a clinician sees a new patient for the first time, they do not immediately 
 Before applying any sophisticated algorithm, we characterize the basic statistical properties of our miRNA expression matrix. Our working matrix, loaded from Week 2 outputs, has the following structure:
 
 ```
-Rows    = miRNAs (e.g., hsa-miR-21-5p, hsa-let-7a-5p, ...)  — typically 100–400 after QC filtering
-Columns = Samples (e.g., GSM3047001, GSM3047002, ...)        — approximately 148 samples (48 AD, 50 MCI, 50 Control)
-Values  = VST-transformed log2-scale expression              — continuous, typically ranging ~2–15
+Rows    = miRNAs (e.g., hsa-miR-21-5p, hsa-let-7a-5p, ...)  — 925 after Week 2 filtering (694 after IQR filtering)
+Columns = Samples (e.g., GSM3403761, GSM3403762, ...)        — 1,328 samples (1,009 AD, 32 MCI, 287 Control)
+Values  = normalized log2 microarray intensity (GSE120584)   — continuous, ranging ~ −1 to 16
 ```
 
 For each miRNA (each row), we compute a set of statistics that describes its behavior across all samples.
@@ -58,7 +58,11 @@ For each miRNA (each row), we compute a set of statistics that describes its beh
 
 **Interquartile Range (IQR):** The range from the 25th to the 75th percentile. IQR is more robust than SD to outlier samples. We use IQR-based variance filtering (keep top 75% by IQR) before most analyses.
 
-**Percentage of zeros (% zeros):** In RNA-seq data, miRNAs with many zero counts — even after normalization — were not detected in many samples. A miRNA with 80% zeros is poorly expressed and will not contribute meaningful biological signal.
+**Percentage of zeros (% zeros):** In RNA-seq data, miRNAs with many zero counts — even after normalization — were not detected in many samples. A miRNA with 80% zeros is poorly expressed and will not contribute meaningful biological signal. **On a microarray such as GSE120584 this column is always 0**: undetected miRNAs are reported at a "not detected" floor value instead of zero (Week 2, Module 2.3.1), and Week 2 already removed miRNAs that sit at the floor in most samples.
+
+**Percentage at the detection floor (% at floor):** The microarray equivalent of % zeros. In each sample the lowest value is the "not detected" floor (the same definition Week 2 used to count detected miRNAs), so % at floor is the share of samples in which the miRNA was not detected. In GSE120584 it ranges from 0% to 43%.
+
+> **CV on a log2 scale:** CV = SD / mean assumes a ratio scale with a true zero. On log2 values the mean depends on an arbitrary origin, and miRNAs near the detection floor have small means — so they get inflated CVs simply because their mean is small. In GSE120584 the top-CV miRNAs (e.g. hsa-miR-3194-3p, hsa-miR-223-3p) all have low mean expression and sit at the detection floor in 9–43% of samples, while the most stable ones (CV < 2%) are highly expressed and never at the floor. One of them, miR-4463, is an internal-control miRNA the submitters normalised to. Use CV as a rough screen only.
 
 ```r
 # ============================================================
@@ -76,6 +80,10 @@ GROUP_COLOURS <- c(
 # ============================================================
 # Compute per-miRNA descriptive statistics
 # ============================================================
+# Detection floor (as in Week 2): each sample's lowest value = "not detected"
+sample_floor <- apply(expr, 2, min)
+at_floor     <- sweep(expr, 2, sample_floor + 0.01, "<=")
+
 mirna_stats <- data.frame(
   mirna       = rownames(expr),
   mean_expr   = rowMeans(expr),
@@ -83,6 +91,7 @@ mirna_stats <- data.frame(
   median_expr = apply(expr, 1, median),
   iqr_expr    = apply(expr, 1, IQR),
   pct_zeros   = rowSums(expr == 0) / ncol(expr) * 100,
+  pct_at_floor = rowMeans(at_floor) * 100,
   stringsAsFactors = FALSE
 )
 
@@ -93,11 +102,11 @@ mirna_stats <- mirna_stats[order(mirna_stats$cv, decreasing = TRUE), ]
 
 # Preview most variable miRNAs
 cat("=== Top 10 Most Variable miRNAs (by CV) ===\n")
-print(head(mirna_stats[, c("mirna", "mean_expr", "sd_expr", "cv", "pct_zeros")], 10))
+print(head(mirna_stats[, c("mirna", "mean_expr", "sd_expr", "cv", "pct_zeros", "pct_at_floor")], 10))
 
 # Preview most stable miRNAs (lowest CV)
 cat("\n=== Top 10 Most Stable miRNAs (by CV) ===\n")
-print(tail(mirna_stats[, c("mirna", "mean_expr", "sd_expr", "cv", "pct_zeros")], 10))
+print(tail(mirna_stats[, c("mirna", "mean_expr", "sd_expr", "cv", "pct_zeros", "pct_at_floor")], 10))
 ```
 
 > **Biological sidebar — What do "stable" miRNAs mean in blood?**
@@ -105,9 +114,9 @@ print(tail(mirna_stats[, c("mirna", "mean_expr", "sd_expr", "cv", "pct_zeros")],
 
 ---
 
-### 3.1.3 Zero-Inflated Distributions in miRNA-seq Data
+### 3.1.3 Zeros, Floors and Detection
 
-RNA-seq count data — even after VST transformation — frequently shows **zero inflation**: a higher proportion of zero values than would be expected from a simple Gaussian or negative binomial distribution. This arises for two distinct reasons:
+How "not detected" looks depends on the platform. **RNA-seq count data** (such as GSE46579) — even after VST transformation — frequently shows **zero inflation**: a higher proportion of zero values than would be expected from a simple Gaussian or negative binomial distribution. This arises for two distinct reasons:
 
 **1. Structural zeros:** The miRNA is genuinely not expressed in a given sample. For example, a neuron-enriched miRNA (like miR-9-5p) may be undetectable in serum from some healthy individuals but detectable in AD patients whose neuronal EV release is increased.
 
@@ -115,33 +124,39 @@ RNA-seq count data — even after VST transformation — frequently shows **zero
 
 Distinguishing these two types is important: structural zeros carry biological information (the miRNA is truly absent in that sample), while sampling zeros are noise. Unfortunately, they are mathematically indistinguishable in a single experiment.
 
-```r
-# Visualize the zero fraction distribution across miRNAs
-library(ggplot2)
+**Microarray data** (such as GSE120584) has no zeros: a miRNA below background is reported at the sample's floor value. The same two situations exist — truly absent vs present but below the detection limit — and are equally indistinguishable. So on an array we count **samples at the detection floor** instead of zeros:
 
-ggplot(mirna_stats, aes(x = pct_zeros)) +
+```r
+# On RNA-seq you would count zeros; on this microarray there are none
+cat("Zero values in the matrix:", sum(expr == 0), "(a microarray never reports 0)\n")
+
+# The microarray equivalent: how often is each miRNA at the detection floor?
+cat("miRNAs at the floor in > 20% of samples:", sum(mirna_stats$pct_at_floor > 20), "\n")
+cat("miRNAs at the floor in > 50% of samples:", sum(mirna_stats$pct_at_floor > 50), "\n")
+
+library(ggplot2)
+ggplot(mirna_stats, aes(x = pct_at_floor)) +
   geom_histogram(bins = 40, fill = "#4575B4", colour = "white", alpha = 0.8) +
   geom_vline(xintercept = 20, colour = "red", linetype = "dashed") +
+  geom_vline(xintercept = 50, colour = "darkred", linetype = "dashed") +
   labs(
-    title   = "Distribution of Zero Percentage Across miRNAs",
-    x       = "% Samples with Zero Expression",
+    title   = "How Often Is Each miRNA Not Detected?",
+    x       = "% Samples at the Detection Floor (not detected)",
     y       = "Number of miRNAs",
-    caption = "Red dashed line: 20% zero threshold"
+    caption = "Red dashed lines: 20% and 50% thresholds"
   ) +
   theme_bw(base_size = 12)
-
-# How many miRNAs have >20% zeros?
-cat("miRNAs with > 20% zeros:", sum(mirna_stats$pct_zeros > 20), "\n")
-cat("miRNAs with > 50% zeros:", sum(mirna_stats$pct_zeros > 50), "\n")
 ```
 
-> **Practical decision:** miRNAs with > 50% zeros across the dataset rarely contribute useful signal to ML models. The Week 2 `filterByExpr` step should have removed most of these, but it is worth verifying here. If >10% of your remaining miRNAs have zero fractions above 50%, consider tightening the filtering threshold.
+On GSE120584 the matrix contains **0 zeros**, **124 of 925 miRNAs** sit at the floor in more than 20% of samples, and **none** in more than 50%. 268 miRNAs are never at the floor, and 396 are at it in fewer than 1% of samples. Week 2's detection filter (detected in ≥ 80% of the samples of at least one group) guarantees the 50% line is not crossed.
+
+> **Practical decision:** miRNAs with > 50% zeros (RNA-seq) or > 50% of samples at the detection floor (microarray) rarely contribute useful signal to ML models. The Week 2 filters (`filterByExpr` for counts; the detection-rate filter for the array) should have removed most of these, but it is worth verifying here. If > 10% of your remaining miRNAs cross the 50% line, consider tightening the filtering threshold.
 
 ---
 
 ### 3.1.4 Distribution Shape: Is the Data Well-Normalized?
 
-After VST transformation, expression values should be approximately normally distributed within each sample — this is one of the goals of VST. Checking this with density plots confirms whether normalization succeeded.
+After normalization (log2 array intensities for GSE120584; VST for RNA-seq counts), expression values should have a similar distribution in every sample. Checking this with density plots confirms whether normalization succeeded.
 
 ```r
 # Density plots for three randomly selected samples (one per group)
@@ -162,7 +177,7 @@ ggplot(density_df, aes(x = expression, colour = group)) +
   scale_colour_manual(values = GROUP_COLOURS) +
   labs(
     title  = "Expression Value Distribution (Three Representative Samples)",
-    x      = "VST-transformed Expression",
+    x      = "Normalised log2 expression",
     y      = "Density",
     colour = "Group"
   ) +
@@ -170,7 +185,7 @@ ggplot(density_df, aes(x = expression, colour = group)) +
 ```
 
 **What to look for:**
-- All three curves should have similar overall shape (approximately unimodal and bell-shaped after VST)
+- All three curves should have similar overall shape (for GSE120584, a peak near the detection floor plus a long tail of detected miRNAs)
 - Curves shifted dramatically relative to each other suggest normalization is incomplete
 - A bimodal distribution (two humps) can indicate: two populations of samples mixed together, or a subset of miRNAs with very low expression pulling down one tail
 
@@ -180,7 +195,7 @@ ggplot(density_df, aes(x = expression, colour = group)) +
 
 ### 3.2.1 The Problem PCA Solves
 
-Our miRNA expression matrix has approximately 300 miRNAs and 148 samples. Visualizing the data directly would require a 300-dimensional plot — impossible for the human visual system. We need a way to **reduce** those 300 dimensions into 2 or 3 that capture the most important structure in the data.
+Our variance-filtered miRNA expression matrix has 694 miRNAs and 1,328 samples. Visualizing the data directly would require a 694-dimensional plot — impossible for the human visual system. We need a way to **reduce** those 300 dimensions into 2 or 3 that capture the most important structure in the data.
 
 Principal Component Analysis (PCA) does exactly this — and it does so in a mathematically principled way that tells us *which* combinations of miRNAs drive the largest sources of variation in the dataset.
 
@@ -192,9 +207,9 @@ Imagine you measured two proteins in 100 serum samples: Protein A (total tau) an
 
 That diagonal line is the **first principal component (PC1)** of this 2-protein dataset. It is the axis of maximum variance — the direction along which samples differ the most. A single number (the coordinate of each sample along PC1) captures most of the information that was spread across two original measurements.
 
-PCA generalizes this to 300 dimensions simultaneously. Each principal component is a **linear combination** of all 300 miRNAs, chosen to capture a different dimension of variation. PC1 captures the largest source of variation; PC2 captures the second largest (and is mathematically perpendicular to PC1); and so on.
+PCA generalizes this to hundreds of dimensions simultaneously. Each principal component is a **linear combination** of all 694 miRNAs, chosen to capture a different dimension of variation. PC1 captures the largest source of variation; PC2 captures the second largest (and is mathematically perpendicular to PC1); and so on.
 
-**The covariance matrix:** Computationally, PCA starts by calculating the **covariance matrix** of the data — a 300×300 matrix where each entry measures how much two miRNAs co-vary across samples. miRNAs that increase together in AD samples (like miR-21 and miR-146a, both elevated in neuroinflammation) will have high positive covariance. miRNAs that move in opposite directions (like miR-29a, downregulated in AD, and miR-146a, upregulated) will have negative covariance. PCA finds the axes that best summarize this entire covariance structure.
+**The covariance matrix:** Computationally, PCA starts by calculating the **covariance matrix** of the data — a 694×694 matrix where each entry measures how much two miRNAs co-vary across samples. miRNAs that increase together in AD samples (like miR-21 and miR-146a, both elevated in neuroinflammation) will have high positive covariance. miRNAs that move in opposite directions (like miR-29a, downregulated in AD, and miR-146a, upregulated) will have negative covariance. PCA finds the axes that best summarize this entire covariance structure.
 
 > **Key insight for biologists:** If PC1 separates AD samples from controls along a single axis, it means that a coordinated program of miRNA changes — a biological module — is the dominant source of variation in the dataset. The miRNAs that contribute most to PC1 (the "loadings") are the miRNAs most responsible for separating the groups. These are your first-pass candidate biomarkers — before any formal differential expression analysis.
 
@@ -270,6 +285,8 @@ ggsave("results/pca_scree_plot.png", p_scree, width = 8, height = 5, dpi = 150)
 - The cumulative variance line tells you: to retain 80% of total data variance, you need the first N PCs
 
 > **Biological interpretation sidebar:** In a well-preprocessed AD miRNA dataset, you might expect PC1 to explain 15–30% of total variance and to correlate strongly with disease group (Control vs AD). PC2 and PC3 might capture age-related variation, sex differences, or miRNA co-expression modules tied to immune cell composition. If PC1 explains >50% of variance and does not correspond to any known biological variable, this suggests residual batch effects or a strongly dominant technical artifact that ComBat did not fully remove.
+
+> **What GSE120584 shows:** PC1 explains 20.1% and PC2 9.5% of the variance; Controls sit on one side of PC1 and AD/MCI on the other, with heavy overlap. But PC1 correlates **0.96** with each array's average expression — it is essentially an "overall signal level" axis. Controls have lower overall signal than AD/MCI samples, which could be biological (more circulating miRNAs in AD) or technical (sample handling, storage time, array processing; Week 2 showed Controls detect fewer miRNAs). Always check what a PC tracks before calling it a disease axis: `cor(pca_result$x[, 1], colMeans(expr_vf))`.
 
 ---
 
@@ -450,7 +467,7 @@ Hierarchical clustering builds a tree (dendrogram) by iteratively merging the tw
 
 **Linkage method — Ward.D2:** Among the several available linkage methods (single, complete, average, Ward.D2), **Ward.D2 linkage** (Ward's minimum variance method with squared Euclidean distances) consistently performs best for gene expression data clustering. It minimizes the total within-cluster variance at each merge step, producing compact, well-separated clusters. This is why pheatmap uses Ward.D2 by default.
 
-**Distance metric:** We use **Euclidean distance** between samples. In the VST-transformed log2 space, Euclidean distance is appropriate because expression differences are on a comparable scale across miRNAs (after scaling). Alternative: 1 minus Pearson correlation (correlation distance) is sometimes used when relative patterns matter more than absolute levels.
+**Distance metric:** We use **Euclidean distance** between samples. In the normalized log2 space, Euclidean distance is appropriate because expression differences are on a comparable scale across miRNAs (after scaling). Alternative: 1 minus Pearson correlation (correlation distance) is sometimes used when relative patterns matter more than absolute levels.
 
 ```r
 # ============================================================
@@ -572,7 +589,13 @@ write.csv(as.data.frame.matrix(purity_table),
           "results/cluster_purity_table.csv")
 ```
 
-> **Biological interpretation:** An overall cluster purity of 0.75 means that 75% of samples are in the cluster dominated by their known clinical group. For an unsupervised analysis — which uses no label information — this is a strong result. It means the miRNA expression patterns are coherent enough within clinical groups that a label-blind algorithm recovers roughly the right groupings. A purity of 0.50 (random) would suggest the miRNA profiles do not differ systematically between groups — concerning for the downstream ML analysis.
+> **Biological interpretation:** An overall cluster purity of 0.75 means that 75% of samples are in the cluster dominated by their known clinical group. For an unsupervised analysis — which uses no label information — this is a strong result. It means the miRNA expression patterns are coherent enough within clinical groups that a label-blind algorithm recovers roughly the right groupings.
+>
+> **What is the chance baseline?** Purity is never 0, even when the clusters are meaningless. If every sample were placed in a single cluster, purity would equal the proportion of the largest clinical group — about 0.33 for three equal-sized groups, but **1,009 / 1,328 = 0.76 for GSE120584**, because AD makes up 76% of the cohort. Random cluster assignments give a value close to this baseline (slightly higher with more clusters). Always judge purity against this baseline, not against 0 or 0.50: a purity near the largest-group proportion suggests the miRNA profiles do not differ systematically between groups, which is concerning for the downstream ML analysis. With three equal groups, a purity of 0.68 would be about twice the chance level.
+>
+> **What GSE120584 shows:** hierarchical clustering at k = 3 gives an overall purity of **0.76 — exactly the chance level** — because every cluster is majority AD (69%, 89% and 70%). Silhouette widths are near zero (≈ 0.06 at the best k = 2), and the gap statistic keeps rising up to the largest k tested. The serum miRNA profiles do not form distinct groups that match the diagnosis; any disease signal is subtle and spread over many miRNAs. With unbalanced groups, prefer chance-corrected metrics such as the adjusted Rand index.
+>
+> **Caution:** purity always increases with the number of clusters (with k = number of samples it reaches 1.0), so compare purity values only at the same k.
 
 ---
 
@@ -655,7 +678,10 @@ annotation_col <- data.frame(
 )
 
 if ("sex" %in% colnames(meta)) {
-  annotation_col$Sex <- factor(meta$sex)
+  # One spelling per sex, whatever the dataset used ("Male", "male", "M" → "male")
+  sex_first_letter   <- tolower(substr(meta$sex, 1, 1))
+  annotation_col$Sex <- factor(c(f = "female", m = "male")[sex_first_letter],
+                               levels = c("female", "male"))
 }
 
 if ("age" %in% colnames(meta) && !all(is.na(meta$age))) {
@@ -670,8 +696,7 @@ if ("age" %in% colnames(meta) && !all(is.na(meta$age))) {
 # Define colours for annotation tracks
 ann_colours <- list(
   Group = GROUP_COLOURS,
-  Sex   = c("Male"   = "#2166AC", "Female" = "#B2182B",
-            "M"      = "#2166AC", "F"      = "#B2182B"),
+  Sex   = c("female" = "#B2182B", "male" = "#2166AC"),
   Age_Group = c("60-69" = "#EFF3FF", "70-74" = "#BDD7E7",
                 "75-79" = "#6BAED6", "80+"   = "#2171B5")
 )
@@ -816,7 +841,16 @@ write.csv(confounder_table, "results/pc_confounder_correlations.csv", row.names 
 
 ### 3.6.3 Partial R²: Partitioning Variance Between Biology and Confounders
 
-Pearson correlation tells us the direction and strength of association, but **partial R²** tells us the *proportion* of variance in each PC explained by each variable, holding other variables constant. This allows us to say, for example: "PC2 is 35% explained by age, 8% explained by sex, and 12% explained by disease group."
+Pearson correlation tells us the direction and strength of association, but a variance decomposition tells us the *proportion* of variance in each PC explained by each variable, holding other variables constant. This allows us to say, for example: "PC2 is 35% explained by age, 8% explained by sex, and 12% explained by disease group."
+
+We fit a linear model `PC1 ~ group + age + sex` and use a Type II ANOVA, which gives each variable a sum of squares (SS) measured *after* adjusting for the other variables, plus a residual SS for the unexplained variation. Two related quantities can be built from this table:
+
+| Quantity | Formula | Interpretation |
+|----------|---------|----------------|
+| **Share of variance** (what the script computes; also called eta-squared, η²) | SS_variable / (SS_group + SS_age + SS_sex + SS_residual) | The fraction of the PC's variance attributable to this variable. Shares of all variables plus the residual add up to 1 |
+| **Partial R²** (textbook definition; also called partial eta-squared) | SS_variable / (SS_variable + SS_residual) | The fraction of the variance *left over after the other variables are accounted for* that this variable explains. Values do not add up to 1 across variables |
+
+The code below reports the **share of variance**. It is labelled "partial R²" in the script and output for simplicity, but the share is the more useful quantity here: it answers "how much of PC1 is age vs disease?" on a common scale. The true partial R² is always at least as large as the share, and the two are close when the variable explains only a small part of the PC. When predictors are correlated (e.g., AD patients are older), Type II sums of squares do not add up exactly to the total, so treat the shares as approximate.
 
 ```r
 # Partial R² using linear regression
@@ -864,8 +898,21 @@ if (all(c("age", "sex") %in% colnames(meta))) {
 }
 ```
 
+Note that `partial_r2_pc1` has four entries: the last one (Residuals) is the share of PC1 variance that group, age and sex together leave unexplained. To compute the textbook partial R² as well, divide each variable's SS by that SS plus the residual SS:
+
+```r
+# Textbook partial R² = SS_variable / (SS_variable + SS_residual)
+ss_pc1          <- anova_pc1$"Sum Sq"
+ss_resid_pc1    <- ss_pc1[length(ss_pc1)]              # last row = Residuals
+true_partial_r2 <- ss_pc1[-length(ss_pc1)] / (ss_pc1[-length(ss_pc1)] + ss_resid_pc1)
+names(true_partial_r2) <- rownames(anova_pc1)[-nrow(anova_pc1)]
+round(true_partial_r2, 3)
+```
+
 > **Biological sidebar — How to respond to confounder findings:**
-> If the partial R² analysis reveals that age explains 25% of PC1 and disease group explains only 15%, this is a serious finding with direct consequences for Week 4 modeling. It means that a significant portion of the miRNA variance your ML model will be trained on is driven by age differences, not disease biology. The appropriate response is: include age as a covariate in the DESeq2 design formula (`~ sex + age + group`), consider matching AD patients with controls on age distribution, and report this finding explicitly in your paper's methods section. This is not a failure of the study — confounders are present in virtually every real clinical dataset. Acknowledging and accounting for them is the mark of rigorous science.
+> If the partial R² analysis reveals that age explains 25% of PC1 and disease group explains only 15%, this is a serious finding with direct consequences for Week 4 modeling. It means that a significant portion of the miRNA variance your ML model will be trained on is driven by age differences, not disease biology. The appropriate response is: include age as a covariate in the Week 4 model (for GSE120584's limma analysis: `model.matrix(~ 0 + group + sex + age)`; for GSE46579's DESeq2 analysis: `~ sex + age + group`), consider matching AD patients with controls on age distribution, and report this finding explicitly in your paper's methods section. This is not a failure of the study — confounders are present in virtually every real clinical dataset. Acknowledging and accounting for them is the mark of rigorous science.
+
+> **What GSE120584 shows:** the shares are small — disease group 3.4%, age 0.6% and sex 0.1% of PC1; 0.2%, 1.8% and 0.5% of PC2 — because the top PCs are dominated by other variation (PC1 by overall array signal). Small values on the top PCs do **not** mean age can be ignored: age differs strongly between groups (AD 79 vs Control 72 years) and correlates with several PCs (r ≈ ±0.17, p < 10⁻⁹). Week 4 therefore includes both age and sex as covariates.
 
 ---
 
@@ -955,7 +1002,7 @@ print(table(meta$group))
 1. **Descriptive statistics table (20 min):**
    - Run the per-miRNA statistics code from Module 3.1.2
    - Identify the top 5 most variable miRNAs (by CV) and look each one up in miRBase — what does each one do biologically?
-   - How many miRNAs have >30% zeros? Does this concern you, and why?
+   - How many miRNAs have >30% zeros? Why is the answer 0 for this microarray? How many miRNAs sit at the detection floor in >30% of samples instead?
 
 2. **PCA and scree plot (25 min):**
    - Run `prcomp()` and generate the scree plot
@@ -1009,12 +1056,13 @@ Using the heatmap generated in Lab 3A, extract the miRNA names from the largest 
 | **Gap statistic** | A method to determine optimal cluster number k by comparing observed within-cluster variation to that expected under a null distribution of no clustering |
 | **Silhouette width** | Per-sample metric (range -1 to +1) measuring how well a sample fits its assigned cluster vs the nearest other cluster; average across samples maximizes at the optimal k |
 | **Cluster purity** | The fraction of samples in each cluster that belong to the dominant clinical group; measures how well unsupervised clusters recover known labels |
+| **Cluster purity baseline** | The purity obtained with no real structure: the proportion of the largest clinical group (≈0.33 for three equal groups; 0.76 for GSE120584). Purity must be judged against this, not against 0 |
 | **Row scaling (z-score)** | Subtracting a miRNA's mean and dividing by its SD across all samples before heatmap plotting; ensures color reflects relative rather than absolute expression |
 | **Coefficient of Variation (CV)** | SD / mean × 100%; a scale-free measure of relative variability; allows comparison of variability between miRNAs at different expression levels |
 | **Confounder** | A variable associated with both the exposure (disease group) and the outcome (miRNA expression) that can create spurious or inflated associations |
-| **Partial R-squared** | The proportion of variance in a response variable (e.g., PC1 score) explained by one predictor variable, holding all other predictors constant; used to partition variance between disease, age, and sex |
+| **Partial R-squared** | Strictly, SS_variable / (SS_variable + SS_residual): the proportion of variance *not explained by the other predictors* that one predictor explains. In this course's script the label is used for the closely related **share of variance** (SS_variable / total SS), which partitions a PC's variance between disease, age, sex and residual |
 | **Mahalanobis distance** | A multivariate distance measure that accounts for correlations between dimensions; used to identify outlier samples in PCA space |
-| **Zero inflation** | The phenomenon of having more zero values in a dataset than expected from the underlying statistical distribution; common in RNA-seq count data |
+| **Zero inflation** | The phenomenon of having more zero values in a dataset than expected from the underlying statistical distribution; common in RNA-seq count data (microarrays report a detection floor instead) |
 
 ---
 
@@ -1046,12 +1094,12 @@ All references retrieved from PubMed.
 Having explored the structure of the data, we are now ready to build the first supervised machine learning models for AD classification.
 
 In Week 4 you will:
-- Run formal differential expression analysis (DESeq2 and limma) to identify miRNAs that are statistically significantly different between AD, MCI, and Control
-- Understand the multiple testing problem and apply Benjamini-Hochberg FDR correction — what an adjusted p-value of 0.05 actually means when testing 300 miRNAs simultaneously
+- Run formal differential expression analysis (limma for the GSE120584 microarray; DESeq2 for the GSE46579 RNA-seq counts) to identify miRNAs that are statistically significantly different between AD, MCI, and Control
+- Understand the multiple testing problem and apply Benjamini-Hochberg FDR correction — what an adjusted p-value of 0.05 actually means when testing ~900 miRNAs simultaneously
 - Build your first ML classifiers: Logistic Regression, Linear SVM, and Random Forest
 - Evaluate model performance with ROC curves, AUC, sensitivity, and specificity
 - Implement cross-validation to get honest estimates of out-of-sample performance
-- Apply filter-based (variance, fold-change) and embedded (LASSO) feature selection to reduce the 300-miRNA space to a focused biomarker panel of 10–30 miRNAs
+- Apply filter-based (variance, fold-change) and embedded (LASSO) feature selection to reduce the several-hundred-miRNA space to a focused biomarker panel of 10–30 miRNAs
 
 The exploratory analyses you completed this week — particularly the PC1 loadings table and the heatmap cluster-defining miRNAs — will serve as a biological reference point for evaluating the Week 4 ML results. If your random forest identifies miR-29a and miR-146a as top features, and you already know from this week's heatmap that these miRNAs show strong group-dependent patterns, the biological coherence of the ML result is confirmed. If the ML identifies miRNAs you have never seen in the EDA, that is a red flag worth investigating carefully.
 

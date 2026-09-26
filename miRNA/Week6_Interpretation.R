@@ -289,7 +289,7 @@ top_mirna_names <- top15$miRNA
 # http://multimir.ucdenver.edu
 #
 # If the connection times out, re-run the query for individual miRNAs using:
-#   multiMiR(mirna = "hsa-miR-21-5p", table = "validated")
+#   get_multimir(mirna = "hsa-miR-21-5p", table = "validated")
 # and rbind the results.
 
 cat("\n=== Querying multiMiR for validated targets ===\n")
@@ -298,7 +298,7 @@ cat("This may take 5–15 minutes. Please wait.\n\n")
 
 # ---- 5A. Query validated (experimentally confirmed) interactions ----
 tryCatch({
-  validated_result <- multiMiR(
+  validated_result <- get_multimir(
     org    = "hsa",
     mirna  = top_mirna_names,
     table  = "validated",         # validated databases: miRTarBase, miRecords, TarBase
@@ -306,12 +306,17 @@ tryCatch({
   )
 
   val_df <- as.data.frame(validated_result@data)
+  # get_multimir() names the columns mature_mirna_id / target_symbol
+  val_df <- dplyr::rename(val_df, mature.mirna  = mature_mirna_id,
+                                  target.symbol = target_symbol)
   cat("Validated interactions retrieved:", nrow(val_df), "\n")
   cat("Unique target genes:", length(unique(val_df$target.symbol)), "\n")
 
 }, error = function(e) {
   cat("multiMiR connection failed:", conditionMessage(e), "\n")
-  cat("Using built-in curated fallback targets for demonstration.\n")
+  cat("Using a built-in EXAMPLE list of classic AD miRNA targets instead.\n")
+  cat("NOTE: these are NOT the targets of your top-ranked miRNAs — the results\n")
+  cat("      below are for demonstration only. Re-run when multiMiR is reachable.\n")
   # Fallback: hand-curated validated targets for the top 15 AD-relevant miRNAs
   # These are representative real interactions from miRTarBase (literature validated)
   val_df <<- data.frame(
@@ -411,7 +416,7 @@ if (nrow(ad_hits) > 0) {
 cat("\nQuerying predicted targets for background universe...\n")
 
 tryCatch({
-  predicted_result <- multiMiR(
+  predicted_result <- get_multimir(
     org                   = "hsa",
     mirna                 = top_mirna_names,
     table                 = "predicted",
@@ -420,6 +425,8 @@ tryCatch({
     use.tibble            = TRUE
   )
   pred_df <- as.data.frame(predicted_result@data)
+  pred_df <- dplyr::rename(pred_df, mature.mirna  = mature_mirna_id,
+                                    target.symbol = target_symbol)
   cat("Predicted targets retrieved:", nrow(pred_df), "\n")
 
 }, error = function(e) {

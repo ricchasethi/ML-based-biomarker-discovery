@@ -17,8 +17,8 @@
 #  10. Save all output objects and report session information
 #
 # Datasets:
-#   GSE120584 — Serum small RNA-seq, 3 groups: AD / MCI / Control   [TRAINING]
-#   GSE46579  — Whole blood Affymetrix microarray, AD / Control      [VALIDATION]
+#   GSE120584 — Serum miRNA microarray (Toray 3D-Gene), AD / MCI / Control  [TRAINING]
+#   GSE46579  — Whole-blood small RNA-seq (Illumina), AD / Control          [VALIDATION]
 #
 # Run each section with Ctrl+Enter (Windows/Linux) or Cmd+Enter (Mac).
 # Sections are designed to run in order; each builds on the previous.
@@ -34,11 +34,17 @@
 #   BiocManager::install("miRBaseConverter")
 #
 # CRAN packages:
-#   install.packages(c("caret", "randomForest", "glmnet", "fastshap", "pROC",
+#   install.packages(c("caret", "randomForest", "glmnet", "pROC", "MLmetrics",
 #                      "ggplot2", "dplyr", "readr", "tidyr"))
+#   (MLmetrics is needed by caret's multiClassSummary in Section 6F.)
+#
+# fastshap was removed from CRAN in 2026 — install the last release from the
+# CRAN archive instead (needs a working C++ compiler, like most R packages):
+#   install.packages(
+#     "https://cran.r-project.org/src/contrib/Archive/fastshap/fastshap_0.1.1.tar.gz",
+#     repos = NULL, type = "source")
 #
 # Note: caret will prompt to install additional "suggested" packages — allow it.
-# Note: fastshap requires R >= 4.0. Install with: install.packages("fastshap")
 
 suppressPackageStartupMessages({
   # Bioconductor
@@ -90,12 +96,12 @@ cat("Output directories confirmed.\n\n")
 # SECTION 2: Load Preprocessed Datasets
 # ==============================================================================
 # These .rds files were created at the end of the Week 2 pipeline.
-# GSE120584: RNA-seq (VST-transformed), 3 groups, serum
-# GSE46579:  Microarray (RMA-normalized), 2 groups, whole blood
+# GSE120584: serum microarray — normalised log2 values, 3 groups
+# GSE46579:  whole-blood small RNA-seq — DESeq2 VST values, 2 groups
 #
 # Expected object dimensions:
-#   expr_gse120584: ~500 miRNAs × 148 samples (after QC filtering)
-#   expr_gse46579:  ~1700 probe sets × 65 samples (before miRNA-level filtering)
+#   expr_gse120584: ~925 miRNAs × ~1,330 samples (after QC filtering)
+#   expr_gse46579:  ~270 miRNAs × ~65 samples (after QC filtering)
 
 cat("=== SECTION 2: Loading Preprocessed Datasets ===\n")
 
@@ -116,10 +122,10 @@ metadata_120584 <- tryCatch(
 )
 
 expr_gse46579 <- tryCatch(
-  readRDS("data/processed/GSE46579_expr_rma.rds"),
+  readRDS("data/processed/GSE46579_expr_vst.rds"),
   error = function(e) {
-    stop("Could not load GSE46579_expr_rma.rds. ",
-         "Have you completed the Week 2 microarray pipeline? ",
+    stop("Could not load GSE46579_expr_vst.rds. ",
+         "Have you completed the Week 2 RNA-seq pipeline (Sections 15–20)? ",
          "Error: ", conditionMessage(e))
   }
 )
@@ -135,14 +141,14 @@ metadata_46579 <- tryCatch(
 # --------------------------------------------------------------------------
 # Dataset summaries
 # --------------------------------------------------------------------------
-cat("\n--- GSE120584 (training, serum RNA-seq) ---\n")
+cat("\n--- GSE120584 (training, serum microarray) ---\n")
 cat("Expression matrix:", nrow(expr_gse120584), "features ×",
     ncol(expr_gse120584), "samples\n")
 cat("Value range:", round(range(expr_gse120584), 2), "\n")
 cat("Group distribution:\n")
 print(table(metadata_120584$group))
 
-cat("\n--- GSE46579 (validation, whole blood microarray) ---\n")
+cat("\n--- GSE46579 (validation, whole-blood RNA-seq) ---\n")
 cat("Expression matrix:", nrow(expr_gse46579), "features ×",
     ncol(expr_gse46579), "samples\n")
 cat("Value range:", round(range(expr_gse46579), 2), "\n")
@@ -152,9 +158,10 @@ print(table(metadata_46579$group))
 # --------------------------------------------------------------------------
 # BIOLOGICAL CHECK:
 # Before harmonization, verify that the two datasets look sensible:
-#   - GSE120584 rows should be named like "hsa-miR-21-5p" or similar
-#   - GSE46579 rows (from microarray probes) may have different naming formats,
-#     possibly including precursor names or older strand notation ("*" suffix)
+#   - GSE120584 rows should be named like "hsa-miR-21-5p" (array annotation);
+#     a few probes list several miRNAs, e.g. "hsa-miR-199a-3p, hsa-miR-199b-3p"
+#   - GSE46579 rows come from miRDeep2 with miRBase v18 names, so some use
+#     older forms without the -5p/-3p suffix (e.g. "hsa-miR-98", "hsa-let-7c")
 # --------------------------------------------------------------------------
 cat("\nFirst 10 feature names in GSE120584:\n")
 print(head(rownames(expr_gse120584), 10))
@@ -167,9 +174,8 @@ cat("  GSE120584: hsa-miR prefix count =",
     sum(grepl("^hsa-miR", rownames(expr_gse120584))), "\n")
 cat("  GSE46579:  hsa-miR prefix count =",
     sum(grepl("^hsa-miR", rownames(expr_gse46579))), "\n")
-# If GSE46579 has very few 'hsa-miR' names, the probe annotation may use a
-# different format. Examine fData(gse46579) from the Week 2 GEO download to
-# find the correct column mapping probe IDs to miRNA names.
+# (let-7 family members start with "hsa-let", so these counts are a little
+# lower than the total number of miRNAs.)
 
 
 # ==============================================================================
@@ -195,6 +201,28 @@ cat("  GSE46579:  hsa-miR prefix count =",
 cat("\n=== SECTION 3: miRNA Name Harmonization ===\n")
 cat("Target version: miRBase v22 (current stable release)\n\n")
 
+# Helper: convert names to stable MIMAT accessions and v22 names.
+#   Step 1 — look each name up in the miRBase version the dataset was annotated
+#            with (a v18 name such as "hsa-miR-98" does not exist in v22, where
+#            it is "hsa-miR-98-5p", so looking it up directly in v22 would fail).
+#   Step 2 — keep mature-miRNA accessions only (MIMAT…); "MI…" accessions are
+#            precursors (hairpins), not the mature miRNA we measured.
+#   Step 3 — translate each accession to its miRBase v22 name. miRNAs retired
+#            before v22 get NA and are dropped.
+# Returns one row per input name: OriginalName, Accession, VersionName (v22).
+convert_to_v22 <- function(mirna_names, from_version) {
+  acc <- miRNA_NameToAccession(mirna_names, version = from_version)$Accession
+  acc[!grepl("^MIMAT", acc)] <- NA
+  v22 <- rep(NA_character_, length(acc))
+  ok  <- !is.na(acc)
+  if (any(ok)) {
+    v22[ok] <- miRNA_AccessionToName(acc[ok], targetVersion = "v22")$TargetName
+  }
+  acc[is.na(v22)] <- NA
+  data.frame(OriginalName = mirna_names, Accession = acc, VersionName = v22,
+             stringsAsFactors = FALSE)
+}
+
 # --------------------------------------------------------------------------
 # 3A. Detect current miRBase version of each dataset's names
 # --------------------------------------------------------------------------
@@ -209,6 +237,7 @@ tryCatch({
   cat("checkMiRNAVersion returned an error:", conditionMessage(e), "\n")
   cat("Proceeding with conversion attempt regardless.\n")
 })
+if (!exists("version_120584")) version_120584 <- "v21"   # array annotation
 
 cat("\n--- Checking miRBase version for GSE46579 ---\n")
 tryCatch({
@@ -220,24 +249,24 @@ tryCatch({
 }, error = function(e) {
   cat("checkMiRNAVersion returned an error:", conditionMessage(e), "\n")
 })
+if (!exists("version_46579")) version_46579 <- "v18"     # miRDeep2, miRBase v18
 
 # --------------------------------------------------------------------------
 # 3B. Convert GSE120584 names to miRBase v22
 # --------------------------------------------------------------------------
-# miRNA_NameToAccession() returns a data frame with:
+# convert_to_v22() returns a data frame with:
 #   OriginalName  — the input miRNA name
 #   Accession     — stable MIMAT accession (version-independent)
-#   VersionName   — the name in the requested miRBase version
+#   VersionName   — the name in miRBase v22
+# Probes that list several miRNAs ("hsa-miR-365a-3p, hsa-miR-365b-3p") cannot
+# be assigned to a single accession and are dropped.
 
 cat("\n--- Converting GSE120584 names to miRBase v22 ---\n")
 
 names_120584 <- rownames(expr_gse120584)
 n_features_120584_before <- length(names_120584)
 
-conversion_120584 <- miRNA_NameToAccession(
-  names_120584,
-  version = "v22"
-)
+conversion_120584 <- convert_to_v22(names_120584, from_version = version_120584)
 
 # How many names were successfully converted?
 converted_120584 <- conversion_120584[!is.na(conversion_120584$Accession), ]
@@ -276,10 +305,7 @@ cat("\n--- Converting GSE46579 names to miRBase v22 ---\n")
 names_46579           <- rownames(expr_gse46579)
 n_features_46579_before <- length(names_46579)
 
-conversion_46579 <- miRNA_NameToAccession(
-  names_46579,
-  version = "v22"
-)
+conversion_46579 <- convert_to_v22(names_46579, from_version = version_46579)
 
 converted_46579 <- conversion_46579[!is.na(conversion_46579$Accession), ]
 failed_46579    <- conversion_46579[is.na(conversion_46579$Accession), ]
@@ -295,88 +321,48 @@ changed_mask_46579 <- converted_46579$OriginalName != converted_46579$VersionNam
 n_changed_46579    <- sum(changed_mask_46579, na.rm = TRUE)
 cat("Names that changed during conversion to v22:", n_changed_46579, "\n")
 
-# Microarray annotations often contain many non-human or control probes.
-# Inspect the failed set to determine whether failures are true miRNAs or
-# probe-level artifacts (e.g., spike-in controls, blank probes).
+# Inspect the failed set: these are usually miRNAs that were renamed or
+# retired from miRBase after v18.
 if (nrow(failed_46579) > 0) {
   cat("\nFirst 10 names not mappable to v22:\n")
   print(head(failed_46579$OriginalName, 10))
-  cat("(These may be non-human miRNAs, spike-in probes, or retired entries.)\n")
+  cat("(These are usually miRNAs renamed or retired in later miRBase versions.)\n")
 }
 
 # --------------------------------------------------------------------------
-# 3D. Handle duplicate MIMAT accessions (multiple probes mapping to same miRNA)
+# 3D. Handle duplicate MIMAT accessions (several names mapping to the same miRNA)
 # --------------------------------------------------------------------------
-# Some microarray platforms contain multiple probes for the same mature miRNA.
-# When this occurs, summarize to the miRNA level by taking the mean across probes.
+# After conversion, two different old names can map to the same MIMAT accession
+# (for example when miRBase merged two entries). When this occurs, summarise to
+# one row per miRNA by taking the mean.
 
-cat("\n--- Handling duplicate MIMAT accessions (GSE46579 microarray) ---\n")
+# Helper: keep the rows that mapped to an accession, rename rows to their
+# MIMAT accession, and average any rows that share the same accession.
+# (Rows = miRNAs, columns = samples, as everywhere in this course.)
+collapse_by_accession <- function(expr_mat, conversion, dataset_name) {
+  mapped <- conversion[!is.na(conversion$Accession), ]
+  mat    <- expr_mat[rownames(expr_mat) %in% mapped$OriginalName, , drop = FALSE]
+  acc    <- mapped$Accession[match(rownames(mat), mapped$OriginalName)]
 
-# Attach accessions to expression matrix
-expr_46579_annotated <- expr_gse46579[
-  rownames(expr_gse46579) %in% converted_46579$OriginalName, ]
+  n_dup <- sum(duplicated(acc))
+  cat(dataset_name, "— duplicate MIMAT accessions (several names → same miRNA):",
+      n_dup, "\n")
 
-# Map accessions
-acc_order <- converted_46579$Accession[
-  match(rownames(expr_46579_annotated), converted_46579$OriginalName)]
-
-# Check for duplicates
-n_duplicates_46579 <- sum(duplicated(acc_order[!is.na(acc_order)]))
-cat("Duplicate MIMAT accessions (multiple probes → same miRNA):",
-    n_duplicates_46579, "\n")
-
-if (n_duplicates_46579 > 0) {
-  cat("Summarizing by taking mean across duplicate probes.\n")
-  # Attach accession as a column for aggregation
-  expr_46579_df        <- as.data.frame(t(expr_46579_annotated))
-  expr_46579_df$MIMAT  <- acc_order
-  expr_46579_df        <- expr_46579_df[!is.na(expr_46579_df$MIMAT), ]
-
-  # Mean across probes with the same MIMAT accession (within each sample)
-  expr_46579_agg <- expr_46579_df %>%
-    group_by(MIMAT) %>%
-    summarise(across(everything(), mean, na.rm = TRUE), .groups = "drop") %>%
-    as.data.frame()
-
-  rownames(expr_46579_agg) <- expr_46579_agg$MIMAT
-  expr_46579_agg$MIMAT     <- NULL
-  expr_46579_agg           <- t(as.matrix(expr_46579_agg))
-  cat("GSE46579 after duplicate aggregation:", nrow(expr_46579_agg), "unique miRNAs\n")
-
-} else {
-  # No duplicates: just keep the mapped features
-  expr_46579_agg  <- expr_46579_annotated
-  rownames(expr_46579_agg) <- acc_order
-  cat("No duplicate probes found; using features directly.\n")
+  if (n_dup > 0) {
+    # rowsum() adds up rows with the same accession; dividing by the number of
+    # rows per accession turns the sums into means (both are sorted by accession)
+    mat <- rowsum(mat, group = acc) / as.vector(table(acc))
+    cat("  Averaged duplicate rows.\n")
+  } else {
+    rownames(mat) <- acc
+  }
+  cat(" ", dataset_name, "after deduplication:", nrow(mat), "unique miRNAs\n")
+  mat
 }
 
-# Similarly handle GSE120584
-expr_120584_annotated <- expr_gse120584[
-  rownames(expr_gse120584) %in% converted_120584$OriginalName, ]
-acc_120584 <- converted_120584$Accession[
-  match(rownames(expr_120584_annotated), converted_120584$OriginalName)]
-
-expr_120584_df       <- as.data.frame(t(expr_120584_annotated))
-expr_120584_df$MIMAT <- acc_120584
-expr_120584_df       <- expr_120584_df[!is.na(expr_120584_df$MIMAT), ]
-
-n_dup_120584 <- sum(duplicated(expr_120584_df$MIMAT))
-cat("\nDuplicate MIMAT accessions in GSE120584:", n_dup_120584, "\n")
-
-if (n_dup_120584 > 0) {
-  expr_120584_agg <- expr_120584_df %>%
-    group_by(MIMAT) %>%
-    summarise(across(everything(), mean, na.rm = TRUE), .groups = "drop") %>%
-    as.data.frame()
-  rownames(expr_120584_agg) <- expr_120584_agg$MIMAT
-  expr_120584_agg$MIMAT     <- NULL
-  expr_120584_agg           <- t(as.matrix(expr_120584_agg))
-} else {
-  expr_120584_agg           <- expr_120584_annotated
-  rownames(expr_120584_agg) <- acc_120584
-}
-
-cat("GSE120584 after deduplication:", nrow(expr_120584_agg), "unique miRNAs\n")
+cat("\n--- Handling duplicate MIMAT accessions ---\n")
+expr_46579_agg  <- collapse_by_accession(expr_gse46579,  conversion_46579,  "GSE46579")
+expr_120584_agg <- collapse_by_accession(expr_gse120584, conversion_120584, "GSE120584")
 
 
 # ==============================================================================
@@ -436,7 +422,7 @@ ad_mirnas_names <- c(
 )
 
 ad_mirna_acc <- tryCatch(
-  miRNA_NameToAccession(ad_mirnas_names, version = "v22"),
+  convert_to_v22(ad_mirnas_names, from_version = "v22"),
   error = function(e) {
     cat("Could not look up AD miRNA accessions:", conditionMessage(e), "\n")
     NULL
@@ -462,10 +448,11 @@ if (!is.null(ad_mirna_acc)) {
   }
 }
 # INTERPRETATION:
-# If miR-29b-3p is absent from GSE46579, this is a platform detection issue
-# (the Affymetrix miRNA array may not have a probe for this miRNA, or it was
-# not expressed above threshold in whole blood). Note such absences in the
-# limitations section of any paper using these data for external validation.
+# If miR-29b-3p is absent from GSE46579, it was filtered out as too lowly
+# expressed in whole blood (Week 2 filterByExpr), or had too few reads in the
+# submitters' own filter. If it is absent from GSE120584, it was not detected
+# above background on the array. Note such absences in the limitations
+# section of any paper using these data for external validation.
 
 # --------------------------------------------------------------------------
 # 4B. Subset both matrices to intersection
@@ -512,9 +499,10 @@ if (!is.null(v22_name_lookup) &&
 # SECTION 5: Per-Dataset Z-Score Standardization
 # ==============================================================================
 # RATIONALE:
-# GSE120584 values are VST-transformed RNA-seq counts (typical range: 0–15)
-# GSE46579 values are RMA-normalized microarray intensities (typical range: 2–14)
-# These scales are not directly comparable due to platform differences.
+# GSE120584 values are normalised log2 microarray intensities (typical range: 0–16)
+# GSE46579 values are VST-transformed RNA-seq counts (typical range: 0–25)
+# These scales are not directly comparable due to platform differences:
+# the same miRNA can sit at very different values on the two platforms.
 #
 # Per-dataset z-score standardization:
 #   For each miRNA (row) in each dataset, subtract the within-dataset mean and
@@ -945,7 +933,13 @@ print(round(cm_3class$byClass[, c("Sensitivity", "Specificity", "F1")], 3))
 #
 # NOTE: fastshap uses a permutation-based approximation. Results are stochastic;
 # set.seed(42) before calling explain() for reproducibility.
-# Increase nsim for more precise SHAP estimates (default 1 is too few; 100 is good).
+# Increase nsim for more precise SHAP estimates (default 1 is too few; 50–100 is good).
+#
+# COMPUTE COST: run time grows with (samples explained) × (features) × nsim.
+# GSE120584 has ~1,300 training samples, so we explain a class-balanced random
+# subset of 200 samples (100 AD, 100 Control). That is plenty to rank miRNAs by
+# global importance, and it runs in minutes instead of hours. The model and the
+# background data (X) still use ALL training samples.
 
 cat("\n=== SECTION 7: SHAP Feature Importance (fastshap) ===\n")
 
@@ -978,20 +972,29 @@ pfun_rf <- function(object, newdata) {
 # 7B. Compute SHAP values
 # --------------------------------------------------------------------------
 # explain() approximates SHAP values using Monte Carlo sampling.
-# nsim = 100 gives a good balance of accuracy vs speed for ~100 features.
-# For large feature sets (>500), try nsim = 50 first.
-# X_train must be a matrix (not data frame) for fastshap.
+#   X            — background data: the full training matrix
+#   newdata      — the samples to explain: the 200-sample subset
+#   pred_wrapper — our prediction function returning P(AD)
+#   nsim = 50    — a good balance of accuracy vs speed here
+# X and newdata must be matrices (not data frames) for fastshap.
 
-cat("Computing SHAP values (nsim=100) — this takes ~1–3 minutes...\n")
+set.seed(42)
+n_per_class <- min(100, min(table(y_train)))
+shap_idx <- sort(c(sample(which(y_train == "AD"),      n_per_class),
+                   sample(which(y_train == "Control"), n_per_class)))
+X_shap <- as.matrix(X_train[shap_idx, ])
+
+cat("Computing SHAP values for", nrow(X_shap),
+    "samples (nsim=50) — this takes a few minutes...\n")
 
 set.seed(42)
 shap_vals <- fastshap::explain(
-  object    = rf_final,
+  object       = rf_final,
   feature_names = colnames(X_train),
-  X         = as.matrix(X_train),
-  pred_fun  = pfun_rf,
-  nsim      = 100,
-  .progress = FALSE
+  X            = as.matrix(X_train),
+  newdata      = X_shap,
+  pred_wrapper = pfun_rf,
+  nsim         = 50
 )
 
 # shap_vals is a matrix: samples × features
@@ -1034,14 +1037,14 @@ cat("  (This file is read by Week6_Interpretation.R for composite ranking.)\n")
 top20_mirnas <- head(shap_importance$miRNA, 20)
 
 shap_long <- as.data.frame(shap_vals[, top20_mirnas]) %>%
-  mutate(sample_idx = seq_len(nrow(X_train))) %>%
+  mutate(sample_idx = seq_len(nrow(X_shap))) %>%
   pivot_longer(cols = -sample_idx,
                names_to  = "miRNA",
                values_to = "shap_value")
 
 # Attach expression values for color encoding
-expr_long <- as.data.frame(X_train[, top20_mirnas]) %>%
-  mutate(sample_idx = seq_len(nrow(X_train))) %>%
+expr_long <- as.data.frame(X_shap[, top20_mirnas]) %>%
+  mutate(sample_idx = seq_len(nrow(X_shap))) %>%
   pivot_longer(cols = -sample_idx,
                names_to  = "miRNA",
                values_to = "expression")
@@ -1318,12 +1321,37 @@ cat("\nInterpretation:\n")
 if (auc_test_rf$p.value < 0.05) {
   cat("  p < 0.05: Training AUC is significantly higher than validation AUC.\n")
   cat("  Some performance degradation on external cohort. This is expected:\n")
-  cat("  platform differences (serum RNA-seq vs whole blood microarray) and\n")
-  cat("  cohort heterogeneity contribute to the gap.\n")
+  cat("  platform differences (serum microarray vs whole-blood RNA-seq), sample\n")
+  cat("  type (serum vs whole blood) and cohort heterogeneity contribute to the gap.\n")
 } else {
   cat("  p >= 0.05: Cannot conclude significant difference in AUC between cohorts.\n")
   cat("  The model generalises comparably to the external cohort.\n")
 }
+# NOTE: a validation AUC near (or below) 0.5 means the model does no better
+# than chance on the new cohort. Check 8F-2 below to see whether the two
+# cohorts even agree on which miRNAs change in AD.
+
+# --------------------------------------------------------------------------
+# 8F-2. Do the two cohorts agree on the AD signal?
+# --------------------------------------------------------------------------
+# A model can only transfer if the miRNAs change in the same direction in both
+# cohorts. For each shared miRNA we compute the AD − Control difference in
+# (z-scored) expression in each cohort, then correlate the two sets of effects.
+#   r close to 1  → the same AD signature in both cohorts
+#   r close to 0  → the cohorts disagree; external validation will be poor
+#                   however well the model does in cross-validation
+# With ~1,300 training samples the CV AUC is a reliable estimate, so a large
+# gap here points to biology/platform (serum microarray vs whole-blood
+# RNA-seq), not to overfitting.
+
+effect_train <- colMeans(X_train[y_train == "AD", ]) - colMeans(X_train[y_train == "Control", ])
+effect_val   <- colMeans(X_val[y_val == "AD", ])     - colMeans(X_val[y_val == "Control", ])
+
+cat("\n--- Agreement of AD effects between cohorts ---\n")
+cat("  miRNAs with the same direction of change:",
+    sum(sign(effect_train) == sign(effect_val)), "of", length(effect_train), "\n")
+cat("  Correlation of AD − Control effects: r =",
+    round(cor(effect_train, effect_val), 3), "\n")
 
 # --------------------------------------------------------------------------
 # 8G. ROC curve comparison plot (both models, both cohorts)
@@ -1614,7 +1642,7 @@ for (i in seq_len(nrow(results_table))) {
   interp <- if (gap < 0.05) "Excellent generalizability"
              else if (gap < 0.10) "Acceptable — some platform effects"
              else if (gap < 0.20) "Moderate degradation — investigate top features"
-             else "Severe degradation — model may have overfit"
+             else "Severe degradation — overfitting, or the signal does not transfer (see 8F-2)"
   cat(sprintf("  %-15s AUC gap = %.4f : %s\n",
               results_table$Model[i], gap, interp))
 }
@@ -1688,14 +1716,14 @@ cat("===========================================================================
 
 cat("\n--- Data Harmonization Summary ---\n")
 cat("Training dataset (GSE120584):\n")
-cat("  Platform:           Illumina HiSeq 2500 small RNA-seq\n")
+cat("  Platform:           Toray 3D-Gene miRNA microarray\n")
 cat("  Sample type:        Serum\n")
 cat("  Original features:  ", n_features_120584_before, "\n")
 cat("  After v22 mapping:  ", nrow(converted_120584), "\n")
 cat("  Names changed:      ", n_changed_120584, "\n")
 
 cat("\nValidation dataset (GSE46579):\n")
-cat("  Platform:           Affymetrix GeneChip miRNA 3.0 Array\n")
+cat("  Platform:           Illumina HiSeq 2000 small RNA-seq\n")
 cat("  Sample type:        Whole blood\n")
 cat("  Original features:  ", n_features_46579_before, "\n")
 cat("  After v22 mapping:  ", nrow(converted_46579), "\n")
@@ -1746,7 +1774,8 @@ cat("AUC gap interpretation:\n")
 cat("  < 0.05:    Excellent generalizability\n")
 cat("  0.05-0.10: Acceptable; some platform effects\n")
 cat("  0.10-0.20: Moderate degradation; investigate top features\n")
-cat("  > 0.20:    Severe degradation; model may have overfit\n\n")
+cat("  > 0.20:    Severe degradation; overfitting, or the AD signal differs\n")
+cat("             between cohorts (check the effect correlation in Section 8)\n\n")
 cat("If AUC gap is large: examine which top SHAP features are absent from the\n")
 cat("  intersection. If key features are missing from GSE46579, the model could\n")
 cat("  not express their full predictive capacity in validation.\n")

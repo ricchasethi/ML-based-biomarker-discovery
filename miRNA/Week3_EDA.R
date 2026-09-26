@@ -11,21 +11,20 @@
 #   outputs to interpret what the data-driven structure means biologically.
 #
 # PREREQUISITES (run Week 2 script first):
-#   data/processed/GSE120584_expr_clean.rds     — VST-normalised expr matrix
+#   data/processed/GSE120584_expr_clean.rds     — normalised log2 microarray matrix
+#                                                  (Toray 3D-Gene serum array)
 #   data/processed/GSE120584_metadata_clean.rds — sample metadata data.frame
-#   data/processed/GSE120584_counts_filtered.rds — raw filtered counts (for
-#                                                    variance-filtered export)
 #
 # OUTPUTS (written to results/):
 #   pca_scree_plot.png, pca_pc1_pc2_group.png, pca_biplot.png
 #   pca_pc34_sex_check.png, pca_outlier_detection.png
-#   pca_pc1_loadings.csv
-#   gap_statistic.png, silhouette_width.png
+#   pca_pc1_loadings.csv, mirna_descriptive_stats.csv
+#   dendrogram_ward_k3.png, gap_statistic.png, silhouette_width.png
 #   heatmap_top50_miRNAs.png
 #   kmeans_pca_overlay.png
 #   cluster_purity_table.csv
 #   pc_confounder_correlations.csv
-#   zero_inflation_histogram.png
+#   detection_floor_histogram.png
 #   density_plot_representative.png
 #
 #   data/processed/GSE120584_expr_varianceFiltered.rds
@@ -90,10 +89,18 @@ GROUP_COLOURS <- c(
 #   SD     — absolute variability
 #   CV     — SD/mean × 100 %: scale-free relative variability
 #   IQR    — robust to outlier samples
-#   %zeros — fraction of samples where this miRNA was undetected
+#   %zeros — RNA-seq: % samples with zero reads. Always 0 on a microarray,
+#            which never reports zero.
+#   %floor — microarray: % samples where the miRNA sits at that sample's
+#            "not detected" floor (its lowest value) — see Week 2, Section 6B
 # ─────────────────────────────────────────────────────────────────────────────
 
 cat("\n─── Section 2: Per-miRNA descriptive statistics ───────────────────────\n\n")
+
+# Detection floor, defined as in Week 2 Section 6B: in each sample, the lowest
+# value is the "not detected" floor. TRUE = miRNA not detected in that sample.
+sample_floor <- apply(expr, 2, min)
+at_floor     <- sweep(expr, 2, sample_floor + 0.01, "<=")
 
 mirna_stats <- data.frame(
   mirna       = rownames(expr),
@@ -102,64 +109,75 @@ mirna_stats <- data.frame(
   median_expr = apply(expr, 1, median),
   iqr_expr    = apply(expr, 1, IQR),
   pct_zeros   = rowSums(expr == 0) / ncol(expr) * 100,
+  pct_at_floor = rowMeans(at_floor) * 100,
   stringsAsFactors = FALSE
 )
 
 # Coefficient of Variation (CV): SD / mean × 100%
+# On log2 values the mean is small for low-abundance miRNAs, so CV ranks
+# miRNAs near the detection floor as "most variable" — compare with pct_at_floor.
 mirna_stats$cv <- mirna_stats$sd_expr / mirna_stats$mean_expr * 100
 
 # Sort by CV (most variable first)
 mirna_stats <- mirna_stats[order(mirna_stats$cv, decreasing = TRUE), ]
 
 cat("=== Top 10 Most Variable miRNAs (by CV — relative variability) ===\n")
-print(head(mirna_stats[, c("mirna", "mean_expr", "sd_expr", "cv", "pct_zeros")], 10))
+print(head(mirna_stats[, c("mirna", "mean_expr", "sd_expr", "cv", "pct_zeros", "pct_at_floor")], 10))
 
 cat("\n=== Top 10 Most Stable miRNAs (by CV) ===\n")
 cat("(candidates for reference normalization controls)\n\n")
-print(tail(mirna_stats[, c("mirna", "mean_expr", "sd_expr", "cv", "pct_zeros")], 10))
+print(tail(mirna_stats[, c("mirna", "mean_expr", "sd_expr", "cv", "pct_zeros", "pct_at_floor")], 10))
 
 # Save the full statistics table
 write.csv(mirna_stats, "results/mirna_descriptive_stats.csv", row.names = FALSE)
 cat("\nFull statistics table saved to results/mirna_descriptive_stats.csv\n")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SECTION 3 — Zero-inflation visualisation
+# SECTION 3 — Zeros and the detection floor
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# WHY: RNA-seq data has two types of zeros:
-#   (1) Structural zeros — miRNA genuinely absent in that sample
-#   (2) Sampling zeros   — miRNA expressed at very low levels, missed by chance
-# miRNAs with >50% zeros rarely carry useful ML signal.
+# WHY: "Not detected" looks different on each platform.
+#   RNA-seq (e.g. GSE46579): an undetected miRNA gets zero reads. Two types:
+#     (1) Structural zeros — miRNA genuinely absent in that sample
+#     (2) Sampling zeros   — miRNA expressed at very low levels, missed by chance
+#   Microarray (GSE120584): there are no zeros. An undetected miRNA is
+#     reported at the sample's floor value; the same two situations hide
+#     behind the floor and are just as impossible to tell apart.
+# miRNAs undetected in >50% of samples rarely carry useful ML signal.
 # ─────────────────────────────────────────────────────────────────────────────
 
-cat("\n─── Section 3: Zero-inflation analysis ────────────────────────────────\n\n")
+cat("\n─── Section 3: Zeros and the detection floor ──────────────────────────\n\n")
 
-cat("miRNAs with >20% zeros:", sum(mirna_stats$pct_zeros > 20), "\n")
-cat("miRNAs with >50% zeros:", sum(mirna_stats$pct_zeros > 50), "\n")
-cat("(If >10% of remaining miRNAs have zero fraction > 50%, tighten Week 2 filter)\n\n")
+cat("Zero values in the matrix:", sum(expr == 0), "(a microarray never reports 0)\n")
+cat("miRNAs with >20% zeros:", sum(mirna_stats$pct_zeros > 20), "\n\n")
 
-p_zero <- ggplot(mirna_stats, aes(x = pct_zeros)) +
+cat("The microarray equivalent — miRNAs at the detection floor in:\n")
+cat("  >20% of samples:", sum(mirna_stats$pct_at_floor > 20), "\n")
+cat("  >50% of samples:", sum(mirna_stats$pct_at_floor > 50), "\n")
+cat("(If >10% of remaining miRNAs are undetected in >50% of samples, tighten the Week 2 filter)\n\n")
+
+p_floor <- ggplot(mirna_stats, aes(x = pct_at_floor)) +
   geom_histogram(bins = 40, fill = "#4575B4", colour = "white", alpha = 0.8) +
   geom_vline(xintercept = 20, colour = "red", linetype = "dashed", linewidth = 0.8) +
   geom_vline(xintercept = 50, colour = "darkred", linetype = "dashed", linewidth = 0.8) +
   labs(
-    title   = "Distribution of Zero Percentage Across miRNAs",
-    x       = "% Samples with Zero Expression",
+    title   = "How Often Is Each miRNA Not Detected?",
+    x       = "% Samples at the Detection Floor (not detected)",
     y       = "Number of miRNAs",
-    caption = "Red dashed lines: 20% and 50% zero thresholds"
+    caption = "Red dashed lines: 20% and 50% thresholds"
   ) +
   theme_bw(base_size = 12) +
   theme(plot.title = element_text(face = "bold"))
 
-ggsave("results/zero_inflation_histogram.png", p_zero, width = 7, height = 5, dpi = 150)
-cat("Zero-inflation histogram saved to results/zero_inflation_histogram.png\n")
+ggsave("results/detection_floor_histogram.png", p_floor, width = 7, height = 5, dpi = 150)
+cat("Detection-floor histogram saved to results/detection_floor_histogram.png\n")
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SECTION 4 — Distribution shape: density plots
 # ─────────────────────────────────────────────────────────────────────────────
 #
-# WHY: After VST, expression values should be approximately normally distributed
-#      within each sample.  All three density curves should have similar shape.
+# WHY: After normalisation, every sample should have a similar distribution of
+#      expression values.  All three density curves should have similar shape.
 #      Dramatic shifts indicate incomplete normalisation.
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -183,10 +201,10 @@ p_density <- ggplot(density_df, aes(x = expression, colour = group)) +
   scale_colour_manual(values = GROUP_COLOURS) +
   labs(
     title   = "Expression Value Distribution (Three Representative Samples)",
-    x       = "VST-transformed Expression",
+    x       = "Normalised log2 expression",
     y       = "Density",
     colour  = "Group",
-    caption = "Curves should have similar shape after VST normalisation"
+    caption = "Curves should have similar shape after normalisation"
   ) +
   theme_bw(base_size = 12) +
   theme(plot.title = element_text(face = "bold"))
@@ -518,7 +536,11 @@ overall_purity     <- sum(apply(purity_table, 1, max)) / sum(purity_table)
 cat("\nPurity per cluster:\n")
 print(round(purity_per_cluster, 3))
 cat("\nOverall cluster purity:", round(overall_purity, 3), "\n")
-cat("(>0.70 = acceptable; 0.50 = no better than random)\n")
+# Chance level = purity you get with no real structure: the share of the
+# largest clinical group. With unbalanced groups this can be high!
+purity_baseline <- max(table(meta$group)) / nrow(meta)
+cat("Chance level (largest group / N):", round(purity_baseline, 3), "\n")
+cat("(Compare purity with the chance level, not with 0 or 0.50)\n")
 
 write.csv(as.data.frame.matrix(purity_table),
           "results/cluster_purity_table.csv")
@@ -600,7 +622,10 @@ annotation_col <- data.frame(
 )
 
 if ("sex" %in% colnames(meta)) {
-  annotation_col$Sex <- factor(meta$sex)
+  # One spelling per sex, whatever the dataset used ("Male", "male", "M" → "male")
+  sex_first_letter   <- tolower(substr(meta$sex, 1, 1))
+  annotation_col$Sex <- factor(c(f = "female", m = "male")[sex_first_letter],
+                               levels = c("female", "male"))
 }
 
 if ("age" %in% colnames(meta) && !all(is.na(meta$age))) {
@@ -614,8 +639,7 @@ if ("age" %in% colnames(meta) && !all(is.na(meta$age))) {
 
 ann_colours <- list(
   Group = GROUP_COLOURS,
-  Sex   = c("Male" = "#2166AC", "Female" = "#B2182B",
-            "M"    = "#2166AC", "F"      = "#B2182B"),
+  Sex   = c("female" = "#B2182B", "male" = "#2166AC"),
   Age_Group = c("60-69" = "#EFF3FF", "70-74" = "#BDD7E7",
                 "75-79" = "#6BAED6", "80+"   = "#2171B5")
 )
@@ -654,7 +678,7 @@ cat("Heatmap saved to results/heatmap_top50_miRNAs.png\n")
 #
 # PARTIAL R²: Partitions variance in each PC between disease, age, and sex,
 #   holding all other variables constant.  Used to inform Week 4 model design
-#   (e.g., include age as covariate in DESeq2 design formula).
+#   (e.g., include age as a covariate in the limma design: ~ 0 + group + sex + age).
 # ─────────────────────────────────────────────────────────────────────────────
 
 cat("\n─── Section 12: Confounder analysis (PC correlations + partial R²) ─────\n\n")
@@ -752,7 +776,7 @@ if (all(c("age", "sex") %in% colnames(meta)) &&
 
   cat("DECISION RULE:\n")
   cat("  If age partial R² on PC1 > disease partial R², include age as a covariate\n")
-  cat("  in the DESeq2 design formula (Week 4): design = ~ sex + age + group\n")
+  cat("  in the Week 4 limma design for GSE120584: ~ 0 + group + sex + age\n")
 } else {
   cat("\nAge and/or sex not fully available — skipping partial R² analysis.\n")
 }
@@ -763,7 +787,8 @@ if (all(c("age", "sex") %in% colnames(meta)) &&
 #
 # WHY: Some samples may pass Week 2 QC metrics but still sit far from all
 #      other samples in their group in PCA space — indicative of technical
-#      or biological anomalies not captured by library-size-based QC.
+#      or biological anomalies not caught by the Week 2 detection, correlation
+#      and hemolysis checks.
 #
 # Mahalanobis distance accounts for the correlation between PC1 and PC2.
 # Threshold: chi-squared distribution at 97.5% with df=2.
@@ -811,9 +836,9 @@ p_outliers <- ggplot(pca_df, aes(x = PC1, y = PC2, colour = Group,
   scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 4)) +
   scale_size_manual(values  = c(`FALSE` = 2.5, `TRUE` = 5)) +
   geom_text_repel(data    = pca_df[pca_df$is_outlier, , drop = FALSE],
-                  aes(label = rownames(pca_df)[pca_df$is_outlier]),
-                  size = 3, colour = "black", inherit.aes = FALSE,
-                  mapping = aes(x = PC1, y = PC2)) +
+                  mapping = aes(x = PC1, y = PC2,
+                                label = rownames(pca_df)[pca_df$is_outlier]),
+                  size = 3, colour = "black", inherit.aes = FALSE) +
   labs(
     title   = "PCA — Mahalanobis Outlier Detection (97.5% threshold)",
     x       = paste0("PC1 (", round(var_explained[1], 1), "% variance)"),
@@ -851,7 +876,7 @@ cat("Files exported to results/:\n")
 cat("  pca_scree_plot.png\n  pca_pc1_pc2_group.png\n  pca_biplot.png\n")
 cat("  pca_pc34_sex_check.png\n  pca_outlier_detection.png\n")
 cat("  pca_pc1_loadings.csv\n  mirna_descriptive_stats.csv\n")
-cat("  zero_inflation_histogram.png\n  density_plot_representative.png\n")
+cat("  detection_floor_histogram.png\n  density_plot_representative.png\n")
 cat("  dendrogram_ward_k3.png\n  gap_statistic.png\n  silhouette_width.png\n")
 cat("  heatmap_top50_miRNAs.png\n  kmeans_pca_overlay.png\n")
 cat("  cluster_purity_table.csv\n  pc_confounder_correlations.csv\n\n")

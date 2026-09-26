@@ -31,7 +31,7 @@ The philosophy of this week: **the computational result is your hypothesis; the 
 
 ### 6.1.1 Revisiting the Biomarker Panel from Week 5
 
-In Week 5, you trained a random forest and/or logistic regression classifier on the harmonized expression matrix (GSE120584 + GSE46579), validated it on a held-out external cohort, and computed SHAP values to explain the model's predictions. The SHAP analysis produced a ranked list of miRNAs: those at the top contributed most to separating AD from control samples.
+In Week 5, you trained a random forest and a LASSO logistic regression classifier on GSE120584 (restricted to the 74 miRNAs shared with GSE46579 after harmonization, z-scored within each dataset), tested them on the external cohort GSE46579, and computed SHAP values to explain the model's predictions. The SHAP analysis produced a ranked list of miRNAs: those at the top contributed most to separating AD from control samples.
 
 Before biological interpretation begins, it is worth pausing to understand exactly what that ranking means — and what it does not mean.
 
@@ -167,7 +167,7 @@ The `multiMiR` package (Ru et al., 2014) provides a unified R interface to 14 va
 **Key function arguments:**
 
 ```r
-multiMiR(
+get_multimir(               # the query function is get_multimir(), not multiMiR()
   org         = "hsa",      # organism: "hsa" = human
   mirna       = "hsa-miR-21-5p",   # one or more miRNA names
   table       = "validated",       # "validated", "predicted", "all", or specific DB name
@@ -187,23 +187,25 @@ The following code block illustrates the complete workflow. Full working code is
 library(multiMiR)
 library(dplyr)
 
-# Assume top_mirnas is a character vector of your top 10 biomarker miRNAs
-# e.g., from your composite SHAP + DE ranking in the R script
-top_mirnas <- c("hsa-miR-21-5p", "hsa-miR-146a-5p", "hsa-miR-132-3p",
-                "hsa-miR-107",   "hsa-miR-29a-3p",  "hsa-miR-128-3p",
-                "hsa-miR-34a-5p","hsa-miR-181a-5p", "hsa-miR-9-5p",
-                "hsa-miR-155-5p")
+# top_mirnas: your top 10 biomarker miRNAs from the composite SHAP + DE
+# ranking (Week 6 script, Section 4). With our data these are:
+top_mirnas <- c("hsa-miR-1229-3p", "hsa-miR-4685-3p", "hsa-miR-1306-5p",
+                "hsa-miR-3620-3p", "hsa-miR-766-3p",  "hsa-miR-3130-5p",
+                "hsa-miR-532-3p",  "hsa-miR-1976",    "hsa-miR-3605-3p",
+                "hsa-miR-30d-5p")
 
 # Query validated interactions for all top miRNAs
-validated_targets <- multiMiR(
+validated_targets <- get_multimir(
   org    = "hsa",
   mirna  = top_mirnas,
   table  = "validated",
   use.tibble = TRUE
 )
 
-# Extract the result data frame
-val_df <- validated_targets@data
+# Extract the result data frame and give the columns the names used below
+val_df <- as.data.frame(validated_targets@data)
+val_df <- dplyr::rename(val_df, mature.mirna  = mature_mirna_id,
+                                target.symbol = target_symbol)
 
 # How many validated interactions were found?
 cat("Total validated miRNA-target interactions:", nrow(val_df), "\n")
@@ -227,6 +229,10 @@ ad_hits <- strong_evidence %>%
 cat("\n=== AD-relevant targets found ===\n")
 print(ad_hits[, c("mature.mirna", "target.symbol", "experiment")])
 ```
+
+> **What our top miRNAs give (Week 6 script, top 15 composite miRNAs):** 19,863 validated interactions (8,824 target genes) — most from high-throughput CLIP experiments in TarBase and miRTarBase — but only **69** with strong low-throughput evidence, 58 of them for just three well-studied miRNAs (miR-30d-5p, miR-330-5p, miR-197-3p). AD-gene hits with strong evidence: miR-30d-5p → TP53, miR-197-3p → FOXO3, miR-766-3p → MAPT; and the top-ranked miRNA, miR-1229-3p, → SORL1, a major AD GWAS gene. Poorly characterised miRNAs such as miR-4685-3p have no strongly supported targets at all — a common situation for new array hits.
+
+> **A warning about fallback data:** earlier versions of the Week 6 script called a non-existent function `multiMiR()`; the error was caught and the script silently substituted a built-in list of classic AD targets (miR-29a → BACE1 and so on) that had nothing to do with the ranked miRNAs. If a query fails, stop and fix it — never interpret placeholder results.
 
 **Expected biological findings — what to look for:**
 
@@ -560,7 +566,7 @@ The FDA-NIH Biomarker Working Group (BEST Glossary, 2016) defines a structured p
 - Where we are in this course: **End of Week 5 / Beginning of Week 6**
 
 **Stage 2 — Qualification**
-- What happens: Analytical characterization of measurement; initial replication in one or more independent cohorts using different technology (e.g., qPCR after miRNA-seq discovery)
+- What happens: Analytical characterization of measurement; initial replication in one or more independent cohorts using different technology (e.g., qPCR after microarray or miRNA-seq discovery)
 - Key questions: Does the biomarker measure what it claims to? Does it replicate in a different population?
 - Output: Narrowed panel (3–15 miRNAs); qPCR assay developed
 - Typical timeline: 2–3 years; 2–5 independent studies
@@ -803,7 +809,7 @@ What will you have at the end? Why does it matter?
 
 **Step 1 (15 min):** Load Week 5 output files.
 - Load `results/Week5/shap_feature_importance.csv` (or equivalent Python output)
-- Load `results/Week4/DE_results_GSE120584.csv`
+- Load `results/Week4/DE_results_GSE120584.csv` (limma AD vs Control results for the GSE120584 microarray)
 - Create a composite ranking (average of SHAP rank and DE significance rank)
 - Select top 15 miRNAs
 
@@ -991,51 +997,40 @@ All references retrieved from PubMed or official regulatory sources.
 | 1 | Setup | R ≥ 4.3, Bioconductor 3.18 | — | Configured environment | Local |
 | 1 | Setup | Python 3.10, conda | — | conda environment `ml_biomarker` | Local |
 | 1 | Setup | RStudio | — | Project structure created | Local |
-| 2 | Data acquisition | `GEOquery::getGEO()` | GSE120584 accession | ExpressionSet object | `data/raw/` |
-| 2 | Data acquisition | `GEOquery::getGEOSuppFiles()` | GSE120584 | Count matrix (`.txt.gz`) | `data/raw/GSE120584/` |
-| 2 | Data acquisition | `GEOquery::getGEO()` | GSE46579 accession | ExpressionSet + CEL files | `data/raw/GSE46579/` |
-| 2 | QC | `edgeR::filterByExpr()` | Raw count matrix | Filtered count matrix | In memory |
-| 2 | Normalization | `DESeq2::vst()` | Count matrix | VST expression matrix | `data/processed/GSE120584_expr_clean.rds` |
-| 2 | Normalization | `edgeR::calcNormFactors()` | Count matrix | TMM-normalized CPM | `data/processed/` |
-| 2 | Normalization | `oligo::rma()` | CEL files | RMA expression matrix | `data/processed/GSE46579_expr_rma.rds` |
-| 2 | QC | `pheatmap::pheatmap()` | Correlation matrix | Heatmap PNG | `qc_reports/` |
-| 2 | Batch correction | `sva::ComBat()` | VST matrix | Batch-corrected matrix | `data/processed/` |
+| 2 | Data acquisition | `GEOquery::getGEO()` | GSE120584 accession | ExpressionSet: normalized log2 microarray matrix + metadata | `data/raw/` |
+| 2 | Data acquisition | `GEOquery::getGEO()` + `getGEOSuppFiles()` | GSE46579 accession | Metadata + read-count Excel table | `data/raw/GSE46579/` |
+| 2 | QC (array) | detection above floor, `cor()`, `prcomp()` | GSE120584 matrix | Detection-filtered matrix; QC log | `qc_reports/` |
+| 2 | Normalization (array) | submitters' internal-control normalization; optional `limma::normalizeBetweenArrays()` | Filtered matrix | Normalized log2 matrix | `data/processed/GSE120584_expr_clean.rds` |
+| 2 | QC (RNA-seq) | `edgeR::filterByExpr()` | Raw count matrix | Filtered count matrix | `data/processed/GSE46579_counts_filtered.rds` |
+| 2 | Normalization (RNA-seq) | `DESeq2::varianceStabilizingTransformation()`, `edgeR::calcNormFactors()` | Count matrix | VST matrix; TMM factors | `data/processed/GSE46579_expr_vst.rds` |
+| 2 | Batch assessment | `prcomp()`, `sva::ComBat()` / SVA (if batches known / hidden) | Normalized matrix | Batch check (no batch column in GSE120584) | `qc_reports/` |
 | 2 | Output | `saveRDS()` | Clean matrices + metadata | `.rds` files | `data/processed/` |
-| 3 | EDA | `stats::prcomp()` | VST matrix | PCA scores | In memory |
-| 3 | EDA | `Rtsne::Rtsne()` | VST matrix | t-SNE embedding | In memory |
-| 3 | EDA | `umap::umap()` | VST matrix | UMAP embedding | In memory |
-| 3 | Clustering | `pheatmap::pheatmap()` | Top variable miRNAs | Clustered heatmap PNG | `results/Week3/` |
-| 3 | Clustering | `cluster::pam()` | Distance matrix | Cluster assignments | `results/Week3/` |
-| 3 | Output | `ggplot2::ggsave()` | PCA/t-SNE/UMAP plots | PNG files | `results/Week3/` |
-| 4 | DE | `DESeq2::DESeq()` | Count matrix + design | DE statistics | In memory |
-| 4 | DE | `limma::voom() + lmFit()` | CPM + design | DE statistics (microarray) | In memory |
-| 4 | Visualization | `ggplot2` (volcano plot) | DE results | Volcano plot PNG | `results/Week4/` |
-| 4 | Output | `write.csv()` | DE results table | `DE_results_GSE120584.csv` | `results/Week4/` |
-| 4 | Output | `write.csv()` | DE results table | `DE_results_GSE46579.csv` | `results/Week4/` |
-| 5 | Harmonization | `sva::ComBat()` | Both VST matrices | Harmonized matrix | `data/processed/harmonized_expr.rds` |
-| 5 | ML | `caret::train()` / sklearn | Harmonized matrix | RF/LR model | `results/Week5/` |
-| 5 | ML | SHAP (shapr / Python shap) | Trained model | SHAP values per miRNA | `results/Week5/shap_feature_importance.csv` |
-| 5 | Validation | `pROC::roc()` | Model predictions | ROC curve, AUC | `results/Week5/` |
-| 5 | Output | `ggplot2::ggsave()` | ROC + SHAP plots | PNG files | `results/Week5/` |
-| 6 | Target prediction | `multiMiR::multiMiR()` | Top 15 miRNA list | Validated target table | `results/Week6/validated_targets.csv` |
-| 6 | Enrichment | `clusterProfiler::enrichKEGG()` | Target Entrez IDs | KEGG result object | In memory |
-| 6 | Enrichment | `clusterProfiler::enrichGO()` | Target Entrez IDs | GO-BP result object | In memory |
-| 6 | Visualization | `clusterProfiler::dotplot()` | KEGG result | Dotplot PNG | `results/Week6/kegg_dotplot.png` |
-| 6 | Visualization | `clusterProfiler::barplot()` | GO result | Barplot PNG | `results/Week6/go_bp_barplot.png` |
-| 6 | Network | `STRINGdb$new()` | Target gene list | STRING network | In memory |
-| 6 | Network | `igraph::graph_from_data_frame()` | STRING interactions | igraph object | In memory |
-| 6 | Network | `igraph::degree()` | PPI graph | Hub gene table | `results/Week6/hub_genes.csv` |
-| 6 | Visualization | `igraph::plot()` | PPI graph | Network PNG | `results/Week6/ppi_network.png` |
+| 3 | EDA | descriptive statistics (mean, SD, CV, IQR) | GSE120584 matrix | miRNA statistics table | `results/` |
+| 3 | EDA | `stats::prcomp()` | Variance-filtered matrix | PCA scores, loadings, scree plot | `results/` |
+| 3 | Clustering | `hclust()` (Ward.D2), `kmeans()`, `cluster::clusGap()`, `silhouette()` | Distance matrix | Clusters, gap statistic, purity | `results/` |
+| 3 | Heatmap | `pheatmap::pheatmap()` | Top 50 variable miRNAs | Annotated heatmap PNG | `results/` |
+| 3 | Confounders | `cor.test()`, `car::Anova()` | PC scores + metadata | PC–covariate correlations; variance shares | `results/` |
+| 4 | DE (array) | `limma::lmFit()` + `eBayes()` | GSE120584 log2 matrix + `~ 0 + group + sex + age` | AD/MCI/Control contrasts | `results/de_results_limma_*.csv` |
+| 4 | DE (RNA-seq) | `DESeq2::DESeq()` + `lfcShrink()` | GSE46579 counts + `~ sex + age + group` | AD vs Control results | `results/de_results_deseq2_AD_vs_Control.csv` |
+| 4 | Feature ranking | `wilcox.test()`, consensus table | DE results | Ranked features | `results/consensus_features_Week4.csv` |
+| 4 | Output | `write.csv()` | limma AD vs Control table | `DE_results_GSE120584.csv` | `results/Week4/` |
+| 5 | Harmonization | `miRBaseConverter` (v21 / v18 → MIMAT → v22) | Both matrices | 74 shared miRNAs, z-scored per dataset | `data/processed/harmonized_expr.rds` |
+| 5 | ML | `caret::train()` (Random Forest, LASSO) | GSE120584 z-scored matrix | Trained models; CV AUC | `results/Week5/` |
+| 5 | Explainability | `fastshap::explain()` | Random Forest | SHAP importance per miRNA | `results/Week5/shap_feature_importance.csv` |
+| 5 | Validation | `pROC::roc()`, `ci.auc()`, `roc.test()` | GSE46579 predictions | External AUC, calibration | `results/Week5/` |
+| 6 | Ranking | composite of SHAP rank and DE rank | Week 4 + Week 5 outputs | Composite ranking | `results/Week6/composite_mirna_ranking.csv` |
+| 6 | Target prediction | `multiMiR::get_multimir()` | Top 15 miRNAs | Validated + predicted targets | `results/Week6/validated_targets_strong_evidence.csv` |
+| 6 | Enrichment | `clusterProfiler::enrichKEGG()`, `enrichGO()` | Target Entrez IDs | KEGG / GO-BP results | `results/Week6/KEGG_enrichment_results.csv` |
+| 6 | Visualization | `dotplot()`, `barplot()` | Enrichment results | Dotplot / barplot PNG | `results/Week6/` |
 | 6 | Summary figure | `ggplot2` (forest plot) | DE + SHAP + targets | Biomarker panel figure | `results/Week6/biomarker_panel_forest_plot.png` |
-| 6 | Validation sim | `ggplot2` (box plots) | Simulated qPCR Ct | qPCR validation plots | `results/Week6/qpcr_validation_sim.png` |
 | 6 | Session info | `sessionInfo()` | R session | Session log | `results/Week6/session_info_week6.txt` |
 
 **Datasets used throughout the course:**
 
 | Dataset | GEO Accession | Sample Type | N (AD / MCI / Control) | Platform | Role |
 |---------|--------------|-------------|------------------------|----------|------|
-| GSE120584 | Primary | Serum | 48 / 50 / 50 | Illumina HiSeq 2500 (small RNA-seq) | Training + DE |
-| GSE46579 | Validation | Whole blood | 35 / — / 30 | Affymetrix GeneChip miRNA 3.0 | External validation |
+| GSE120584 | Primary | Serum | 1,009 / 32 / 287 (after QC) | Toray 3D-Gene microarray (GPL21263) | Training + DE (limma) |
+| GSE46579 | Validation | Whole blood | 44 / — / 21 (after QC) | Illumina HiSeq 2000 small RNA-seq (GPL11154) | External validation + DE (DESeq2) |
 
 ---
 

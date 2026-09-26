@@ -20,7 +20,7 @@ By the end of Week 5, you will be able to:
 
 In Weeks 3 and 4, you built your first machine learning classifiers — logistic regression, random forest — and saw training and test set AUC values. Perhaps your random forest achieved AUC = 0.91 on the held-out test set. That is an exciting number. Before you write a paper and send a press release, however, three questions should give you pause:
 
-**Question 1:** Was your model performance estimate actually unbiased? In high-dimensional biological data — where you have perhaps 800 miRNA features and only 148 patients — many sources of optimistic bias can inflate apparent performance even on a "test set."
+**Question 1:** Was your model performance estimate actually unbiased? In high-dimensional biological data — where a typical cohort has perhaps 800 miRNA features and only ~150 patients — many sources of optimistic bias can inflate apparent performance even on a "test set."
 
 **Question 2:** Can you explain *which* miRNAs drove the predictions, and do those miRNAs make biological sense? A black-box model that cannot be interpreted is unlikely to generate clinical hypotheses or survive peer review.
 
@@ -59,7 +59,7 @@ Error
                     Model Complexity
 ```
 
-**In miRNA biomarker discovery:** You have roughly 800 detected miRNAs (features) and 148 patients (samples) in GSE120584. Your feature-to-sample ratio is approximately 5:1. This is a regime where overfitting is the primary threat. Every model that can freely adjust 800 parameters with only 148 examples will overfit if not carefully constrained.
+**In miRNA biomarker discovery:** A typical published cohort has roughly 800 detected miRNAs (features) and ~150 patients (samples) — a feature-to-sample ratio of about 5:1, a regime where overfitting is the primary threat. Every model that can freely adjust 800 parameters with only 148 examples will overfit if not carefully constrained. The examples in this module use such a 148-patient cohort. Our own datasets sit on either side: GSE120584 is unusually large (925 miRNAs, 1,296 AD + Control samples), while our validation cohort GSE46579 (273 miRNAs, 65 samples) is in the classic p > n regime. Even with GSE120584's size, a weak and diffuse signal means that leakage and optimistic tuning still matter.
 
 ### 5.1.2 The Curse of Dimensionality
 
@@ -374,11 +374,12 @@ library(caret)
 # ============================================================
 # Nested cross-validation implementation in caret
 # ============================================================
-# caret implements nested CV naturally:
-#   - trainControl defines the OUTER loop (performance estimation)
-#   - The tuneGrid defines the hyperparameter grid for the INNER loop
-#   - caret automatically runs inner CV for each outer training fold
-#     to select the best hyperparameters
+# IMPORTANT: train() on its own is NOT nested CV.
+#   caret evaluates every candidate hyperparameter on the SAME resamples
+#   (here 5-fold x 3 repeats) and reports the resampled AUC of the best
+#   one — tuning and performance estimation share the folds (flat CV).
+#   The code below is what Week5_Validation.R does; a truly nested
+#   version wraps it in an outer loop (see the snippet after this block).
 
 set.seed(42)
 
@@ -440,6 +441,23 @@ cat(sprintf("\nNested CV AUC (tuned):       %.4f\n", max(model_rf_nested$results
 cat(sprintf("Flat CV AUC (fixed mtry):    %.4f\n", flat_auc))
 cat("(If nested CV AUC is lower, hyperparameter tuning was overfitting the folds.)\n")
 ```
+
+**Making it truly nested.** Put `train()` (the inner, tuning loop) inside an outer loop that holds out samples it never sees:
+
+```r
+set.seed(42)
+outer_folds <- createFolds(y, k = 5)                 # outer loop: 5 held-out folds
+outer_auc <- sapply(outer_folds, function(test_idx) {
+  fit <- train(x = X[-test_idx, ], y = y[-test_idx],  # inner loop tunes mtry on
+               method = "rf", metric = "ROC",         # the outer TRAINING data only
+               trControl = ctrl_nested, tuneGrid = rf_grid, ntree = 300)
+  p <- predict(fit, X[test_idx, ], type = "prob")[, "AD"]
+  as.numeric(pROC::auc(y[test_idx], p, quiet = TRUE))
+})
+mean(outer_auc)                                      # nested CV AUC
+```
+
+> **How big is the difference for our data?** With ~1,300 training samples and only three `mtry` values, the optimism of caret's flat estimate is small. In GSE120584 the flat CV AUC is 0.74 (Random Forest) and 0.77 (LASSO). The difference matters much more for small cohorts and large tuning grids.
 
 ### 5.2.5 Visualizing Nested CV vs Flat CV
 
@@ -684,17 +702,23 @@ pfun_rf <- function(object, newdata) {
   predict(object, newdata = as.matrix(newdata), type = "prob")[, "AD"]
 }
 
-# Compute SHAP values via Monte Carlo sampling (nsim = 100)
-# Larger nsim = more precise SHAP but slower. Start with nsim=50, increase to 200.
-cat("Computing SHAP values (nsim=100)...\n")
+# Compute SHAP values via Monte Carlo sampling
+# Larger nsim = more precise SHAP but slower. Run time also grows with the
+# number of samples explained: with ~1,300 training samples we explain a
+# class-balanced random subset of 200 (the background X is still all samples).
+set.seed(42)
+shap_idx <- c(sample(which(y == "AD"), 100), sample(which(y == "Control"), 100))
+X_shap   <- as.matrix(X[shap_idx, ])
+
+cat("Computing SHAP values (nsim=50)...\n")
 set.seed(42)
 shap_values <- fastshap::explain(
   object        = rf_final,
   feature_names = colnames(X),
-  X             = as.matrix(X),
-  pred_fun      = pfun_rf,
-  nsim          = 100,
-  .progress     = FALSE
+  X             = as.matrix(X),    # background data
+  newdata       = X_shap,          # samples to explain
+  pred_wrapper  = pfun_rf,         # NB: the argument is pred_wrapper, not pred_fun
+  nsim          = 50
 )
 
 # shap_values: samples x features matrix
@@ -975,6 +999,8 @@ ggsave("results/Week5/confusion_matrix_3class.png",
 
 > **Biological interpretation of MCI misclassification:** In a typical confusion matrix for this three-class problem, you will see that MCI samples are misclassified as either AD or Control at much higher rates than AD or Control samples are misclassified as each other. This is not a model deficiency — it accurately reflects biological reality. MCI patients are biologically intermediate: some have early amyloid pathology indistinguishable from AD; others have mild, non-specific decline. A model that correctly classifies MCI 55% of the time but AD and Control 85–90% of the time is performing appropriately given the biology. The MCI classification performance tells you something about the biological distinctiveness of MCI as a molecular state — and in this case, the answer is that miRNA alone captures only part of the MCI signature. Combined biomarkers (miRNA + CSF Abeta/tau, or miRNA + PET imaging) would likely improve MCI classification substantially.
 
+> **What GSE120584 shows:** with 1,009 AD, 287 Control and only 32 MCI samples, the three-class Random Forest **never predicts MCI**: all 32 MCI samples are called AD (MCI sensitivity 0), Controls are mostly called AD too (sensitivity 0.16), and AD sensitivity is 0.99. Overall accuracy (78%) is barely above the 76% obtained by calling everyone AD. Class weights, down-sampling (`trainControl(sampling = "down")`), a larger MCI cohort, and balanced metrics (balanced accuracy, macro-F1, per-class recall) are needed.
+
 ---
 
 ## MODULE 5.6 — External Validation: Why It Matters
@@ -1013,9 +1039,9 @@ How should you interpret the size of this gap?
 
 > **Biological sidebar — What does a 15% AUC drop in external validation mean biologically?**
 >
-> Suppose your model achieves AUC = 0.88 on GSE120584 (serum RNA-seq) but drops to AUC = 0.73 on GSE46579 (whole blood microarray). Several biological and technical explanations are possible:
+> Suppose your model achieves AUC = 0.88 on GSE120584 (serum microarray) but drops to AUC = 0.73 on GSE46579 (whole-blood small RNA-seq). Several biological and technical explanations are possible:
 >
-> 1. **Platform difference:** Serum versus whole blood captures different miRNA compartments. Serum is depleted of cellular miRNAs and enriched for exosome-packaged miRNAs. Whole blood includes miRNAs from leukocytes. Some miRNAs differentially expressed in serum-AD may not be differentially expressed (or may not be detected) in whole blood.
+> 1. **Sample-type and platform difference:** Serum versus whole blood captures different miRNA compartments, and a fluorescence array and sequencing measure them differently (compressed array fold changes; read counts dominated by a few abundant miRNAs). Serum is depleted of cellular miRNAs and enriched for exosome-packaged miRNAs. Whole blood includes miRNAs from leukocytes. Some miRNAs differentially expressed in serum-AD may not be differentially expressed (or may not be detected) in whole blood.
 >
 > 2. **Cohort heterogeneity:** GSE46579 was collected in a different country, with different AD diagnostic criteria (perhaps including more mild-stage patients), different comorbidity profiles, and different blood processing protocols.
 >
@@ -1025,16 +1051,17 @@ How should you interpret the size of this gap?
 >
 > The most productive response to a 15% drop is not to dismiss the result but to investigate it: examine which features have the highest SHAP values in the training set, check whether those same miRNAs are detected in the validation platform, and test whether a model retrained only on features present in both platforms narrows the gap.
 
+> **What actually happens with our data:** the gap is far larger than in this example. Training CV AUC is 0.74 (Random Forest) and 0.77 (LASSO), but external AUC on GSE46579 is **0.57** (95% CI 0.44–0.69) and **0.42** — no better than chance. The reason shows up in a simple check (Week 5 script, Section 8F-2): for the 74 shared miRNAs, the AD − Control differences in the two cohorts are essentially **uncorrelated (r = 0.03)**, and only 43 of 74 change in the same direction. With ~1,300 training samples this is not simple overfitting — the serum-array AD signature does not exist in the whole-blood RNA-seq data. Most published blood miRNA signatures fail to replicate across platforms and sample types; reporting such a result honestly is good science.
+
 ### 5.6.3 The GSE46579 Validation Dataset
 
 **GSE46579 characteristics:**
-- Platform: GPL16384 (Affymetrix GeneChip miRNA 3.0 Array)
+- Platform: GPL11154 (Illumina HiSeq 2000 — small RNA-seq); counts from miRDeep2 (miRBase v18)
 - Sample type: Whole blood
-- Groups: AD (n=35), Controls (n=30)
-- Total samples: 65
-- Key difference from GSE120584: microarray vs RNA-seq; whole blood vs serum; different N
+- Groups: AD (n=48), Controls (n=22); 65 samples (44 AD, 21 Control) after Week 2 QC
+- Key difference from GSE120584: RNA-seq vs microarray; whole blood vs serum; much smaller N
 
-**The cross-platform challenge:** Affymetrix miRNA 3.0 arrays use probe names derived from the miRBase version current at the time of array design (approximately miRBase v14–v16). GSE120584 RNA-seq data uses miRNA names from the alignment reference used (often miRBase v20–v22). Many miRNA names changed between versions — hyphens, strand designations (-3p vs -5p), and mature vs precursor designations all changed.
+**The cross-platform challenge:** The two datasets name miRNAs using different miRBase versions. GSE46579's counts were assigned with miRBase **v18** (e.g. `hsa-miR-98`, `hsa-let-7c`), while the GSE120584 array annotation matches miRBase **v21** (`hsa-miR-98-5p`, `hsa-let-7c-5p`). Many miRNA names changed between versions — strand designations (-3p vs -5p), unsuffixed names, and retired entries. A plain name match finds only 69 shared miRNAs.
 
 Before any cross-platform comparison, miRNA names must be harmonized to the same version. Module 5.7 covers this in detail.
 
@@ -1065,19 +1092,29 @@ library(miRBaseConverter)
 version_120584 <- checkMiRNAVersion(rownames(expr_gse120584), verbose = TRUE)
 version_46579  <- checkMiRNAVersion(rownames(expr_gse46579),  verbose = TRUE)
 
-# 2. Convert all miRNA names in GSE120584 to miRBase v22
-# Returns: data frame with OriginalName, Accession (MIMAT), VersionName (v22)
-result_120584 <- miRNA_NameToAccession(rownames(expr_gse120584), version = "v22")
+#    → "v21" for GSE120584, "v18" for GSE46579
 
-# 3. Same for GSE46579
-result_46579 <- miRNA_NameToAccession(rownames(expr_gse46579), version = "v22")
+# 2. Look each name up in ITS OWN miRBase version to get the stable
+#    MIMAT accession. Looking a v18 name such as "hsa-miR-98" up in v22
+#    (where it is "hsa-miR-98-5p") would fail.
+#    miRNA_NameToAccession() returns two columns: miRNAName_<version>, Accession
+result_120584 <- miRNA_NameToAccession(rownames(expr_gse120584), version = version_120584)
+result_46579  <- miRNA_NameToAccession(rownames(expr_gse46579),  version = version_46579)
+
+# 3. Keep mature-miRNA accessions only (MIMAT...); "MI..." accessions are
+#    precursors (hairpins), not the mature miRNA that was measured
+result_120584$Accession[!grepl("^MIMAT", result_120584$Accession)] <- NA
+result_46579$Accession[!grepl("^MIMAT",  result_46579$Accession)]  <- NA
+# Result: 907 / 925 GSE120584 names and 270 / 273 GSE46579 names map.
+# Failures: composite array probes ("hsa-miR-365a-3p, hsa-miR-365b-3p") and
+# entries retired before v22 (e.g. hsa-miR-720, later shown to be a tRNA fragment)
 
 # 4. Find the intersection of MIMAT accessions (version-independent)
 common_MIMAT <- intersect(
   result_120584$Accession[!is.na(result_120584$Accession)],
   result_46579$Accession[!is.na(result_46579$Accession)]
 )
-cat("miRNAs in common after harmonization:", length(common_MIMAT), "\n")
+cat("miRNAs in common after harmonization:", length(common_MIMAT), "\n")   # 74
 
 # 5. Subset both expression matrices to the intersection
 expr_120584_sub <- expr_gse120584[result_120584$Accession %in% common_MIMAT, ]
@@ -1091,7 +1128,7 @@ rownames(expr_46579_sub)  <- v22_names$TargetName
 
 ### 5.7.3 Per-Dataset Z-Score Standardization
 
-After finding the intersection, the expression values are on completely different scales: GSE120584 is VST-transformed RNA-seq counts; GSE46579 is RMA-normalized microarray intensities. You cannot train on one and test on the other without removing this scale difference.
+After finding the intersection, the expression values are on completely different scales: GSE120584 is normalized log2 microarray intensity (≈ −1 to 16); GSE46579 is VST-transformed RNA-seq counts (≈ 0 to 25). You cannot train on one and test on the other without removing this scale difference.
 
 **Z-score standardization per dataset** resolves this by converting each dataset independently to have mean = 0 and standard deviation = 1 per miRNA:
 
@@ -1132,7 +1169,7 @@ cat("Validation matrix (z-scored):", nrow(expr_46579_z), "miRNAs ×",
     ncol(expr_46579_z), "samples\n")
 ```
 
-> **Why standardize each dataset separately?** Consider: miR-21-5p might have a mean VST expression of 12.4 in GSE120584 but a mean RMA intensity of 8.7 in GSE46579. These numbers are not comparable — they are on completely different scales due to the different measurement technologies. After per-dataset z-scoring, both datasets will express miR-21-5p as deviations from its own dataset's mean. A sample with high miR-21-5p expression relative to the rest of GSE120584 will have a positive z-score, as will a sample with high miR-21-5p relative to the rest of GSE46579. Relative (within-dataset) differences are preserved; absolute (across-dataset) scale differences are removed.
+> **Why standardize each dataset separately?** Consider: a miRNA might have a mean log2 array intensity of 8.7 in GSE120584 but a mean VST expression of 12.4 in GSE46579. These numbers are not comparable — they are on completely different scales due to the different measurement technologies. After per-dataset z-scoring, both datasets will express miR-21-5p as deviations from its own dataset's mean. A sample with high miR-21-5p expression relative to the rest of GSE120584 will have a positive z-score, as will a sample with high miR-21-5p relative to the rest of GSE46579. Relative (within-dataset) differences are preserved; absolute (across-dataset) scale differences are removed.
 
 ### 5.7.4 External Validation: Train on GSE120584, Apply to GSE46579
 
@@ -1198,7 +1235,7 @@ ggsave("results/Week5/roc_external_validation.png",
 For datasets where the sample types are compatible (e.g., both serum), ComBat can be applied to remove cross-study batch effects before combining datasets. This is more aggressive than per-dataset z-scoring and should be used cautiously.
 
 Key considerations:
-- ComBat-seq requires raw count data (not VST/log-transformed)
+- ComBat-seq requires raw count data (not VST/log-transformed) — so it cannot be used when one dataset is a microarray, as here
 - The `group` variable (AD vs Control) must be specified as a biological covariate to protect it from removal
 - After ComBat, re-run VST transformation and re-check PCA for remaining batch structure
 - If the two datasets differ in sample type (serum vs whole blood), ComBat will correct technical differences but cannot resolve the genuine biological difference in miRNA composition between sample types
@@ -1440,7 +1477,7 @@ Run Section 6:
 Run Section 7:
 1. Refit Random Forest on full training data (best mtry from nested CV)
 2. Define `pfun_rf` for fastshap
-3. Call `fastshap::explain()` with `nsim=100`
+3. Call `fastshap::explain()` with `pred_wrapper = pfun_rf`, `nsim = 50` and a 200-sample subset as `newdata`
 4. Plot the beeswarm using ggplot2
 
 5. For the top miRNA by mean |SHAP|: note the direction of effect (does high expression → AD or → Control?)
